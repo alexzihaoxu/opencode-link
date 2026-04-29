@@ -63,6 +63,15 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       output.system.push(link.systemPrompt());
     },
 
+    // Capture the session's current model + agent so pushed peer messages
+    // wake the agent under the same model the user has been using, instead
+    // of opencode's default-model fallback.
+    "chat.params": async (input, _output) => {
+      if (input.sessionID && input.model?.providerID && input.model?.id) {
+        link.bindModel(input.sessionID, input.model.providerID, input.model.id, input.agent);
+      }
+    },
+
     event: async ({ event }) => {
       const sid: string | undefined =
         (event as any)?.session_id ??

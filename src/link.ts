@@ -73,6 +73,16 @@ export class Link {
   private sessions = new Set<string>();
   private lastSessionId: string | null = null;
   private pendingPushes: PendingPush[] = [];
+  /**
+   * Per-session model + agent, captured from the chat.params hook so we can
+   * route pushed peer messages through the same model the user has been
+   * using rather than letting client.session.prompt fall back to opencode's
+   * default (e.g. the title model).
+   */
+  private sessionModels = new Map<
+    string,
+    { providerID: string; modelID: string; agent?: string }
+  >();
 
   constructor(
     public readonly identity: Identity,
@@ -89,6 +99,15 @@ export class Link {
     this.sessions.add(sessionId);
     this.lastSessionId = sessionId;
     this.flushPending();
+  }
+
+  bindModel(
+    sessionId: string,
+    providerID: string,
+    modelID: string,
+    agent: string | undefined,
+  ): void {
+    this.sessionModels.set(sessionId, { providerID, modelID, agent });
   }
 
   noteSession(sessionId: string, kind: "created" | "active" | "deleted"): void {
@@ -305,12 +324,21 @@ export class Link {
   private async pushToSession(sessionId: string, push: PendingPush): Promise<void> {
     if (!this.client?.session?.prompt) return;
     const text = `[link from ${push.fromName}] ${push.text}`;
+    const body: Record<string, unknown> = {
+      parts: [{ type: "text", text }],
+    };
+    // Route the wake-up through the same model + agent the session is
+    // already using; otherwise opencode falls back to the title/default
+    // model and the agent's reply turn doesn't match the user's session.
+    const m = this.sessionModels.get(sessionId);
+    if (m) {
+      body.model = { providerID: m.providerID, modelID: m.modelID };
+      if (m.agent) body.agent = m.agent;
+    }
     try {
       await this.client.session.prompt({
         path: { id: sessionId },
-        body: {
-          parts: [{ type: "text", text }],
-        },
+        body,
       });
     } catch (err) {
       this.pendingPushes.push(push);
