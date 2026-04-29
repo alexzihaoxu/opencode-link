@@ -1,5 +1,12 @@
 import { createRequire } from "node:module";
-import { peerIdForCode, persist, normalizeCode, type Identity } from "./identity.ts";
+import {
+  peerIdForCode,
+  persist,
+  normalizeCode,
+  saltFilePath,
+  type Identity,
+  type SaltSource,
+} from "./identity.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -67,7 +74,11 @@ export class Link {
   private lastSessionId: string | null = null;
   private pendingPushes: PendingPush[] = [];
 
-  constructor(public readonly identity: Identity, private readonly options: LinkOptions = envOptions()) {}
+  constructor(
+    public readonly identity: Identity,
+    public readonly salt: SaltSource,
+    private readonly options: LinkOptions = envOptions(),
+  ) {}
 
   setClient(client: any): void {
     this.client = client;
@@ -94,6 +105,28 @@ export class Link {
   }
 
   systemPrompt(): string {
+    if (!this.salt.value) {
+      // No salt configured — can't connect. Tell the agent to brief the user
+      // before attempting any link_* call (they'll all error anyway).
+      return [
+        "opencode-link is INSTALLED but NOT YET CONFIGURED — it has no shared salt.",
+        "",
+        "The salt is a shared secret that namespaces a group: only agents whose configured salt matches yours can reach each other. Without one, no peer-to-peer connection can be established.",
+        "",
+        "If the user asks you to talk to another agent, OR runs any link_* tool, FIRST tell them this:",
+        "",
+        '  "I can\'t connect to other agents until a shared salt is configured. Pick one of:',
+        "    1. Set the env var OPENCODE_LINK_SALT=<a long random string>, restart opencode.",
+        `    2. Write the salt to ${saltFilePath()} (one line of text).`,
+        "  Whichever you pick, anyone you want to talk to must use the SAME salt — share it with them out of band (Signal, password manager, etc).",
+        "  A good salt: `openssl rand -hex 32` produces a 64-char value with plenty of entropy.",
+        '  The env var wins over the file if both are set."',
+        "",
+        "Tools (all will error with a clear message until a salt is configured):",
+        "  link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.",
+      ].join("\n");
+    }
+
     const lines = [
       "You have access to opencode-link, a peer-to-peer messaging tool that connects you with other opencode agents over WebRTC.",
       "Use it when the user asks you to talk to or coordinate with another agent.",
@@ -109,6 +142,7 @@ export class Link {
       );
     }
     lines.push(
+      `- Namespace salt: configured (from ${this.salt.origin === "env" ? "env var OPENCODE_LINK_SALT" : "salt file"}). You can only reach agents whose salt matches.`,
       "",
       "Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.",
       "Codes are 6 characters of A-Z and 0-9 (e.g. `A1GH35`). Anything else is invalid.",
@@ -127,13 +161,21 @@ export class Link {
     return lines.join("\n");
   }
 
+  private noSaltError(): Error {
+    return new Error(
+      `opencode-link has no shared salt configured. Set OPENCODE_LINK_SALT env var or write to ${saltFilePath()}. Both ends of the connection need the same salt.`,
+    );
+  }
+
   async start(): Promise<void> {
+    if (!this.salt.value) throw this.noSaltError();
     if (this.ready) return this.ready;
     this.ready = this.bootPeer();
     return this.ready;
   }
 
   private async bootPeer(): Promise<void> {
+    if (!this.salt.value) throw this.noSaltError();
     // The vendored peerjs-on-node bundle has been patched to declare its
     // WebSocket / RTC* aliases as module-local vars instead of implicit
     // globals (see lib/peerjs-on-node/dist/peerjs-on-node.js header). This
@@ -141,7 +183,7 @@ export class Link {
     // stream parser (which uses Bun's native WebSocket) keeps working.
     const mod = require("peerjs-on-node");
     const Peer = mod.Peer ?? mod.default?.Peer ?? mod;
-    const myPeerId = peerIdForCode(this.identity.code);
+    const myPeerId = peerIdForCode(this.identity.code, this.salt.value);
     this.peer = new Peer(myPeerId, this.options);
 
     await new Promise<void>((resolve, reject) => {
@@ -278,16 +320,18 @@ export class Link {
 
   /** Look up an existing connection by remote code (or null if not connected). */
   private slotByCode(code: string): ConnSlot | null {
-    const peerId = peerIdForCode(code);
+    if (!this.salt.value) return null;
+    const peerId = peerIdForCode(code, this.salt.value);
     return this.connections.get(peerId) ?? null;
   }
 
   async connect(rawCode: string): Promise<void> {
+    if (!this.salt.value) throw this.noSaltError();
     const code = normalizeCode(rawCode);
     if (code.length !== 6) throw new Error(`invalid code "${rawCode}" — expected 6 chars of A-Z and 0-9`);
     if (code === this.identity.code) throw new Error(`cannot connect to your own code`);
     await this.start();
-    const peerId = peerIdForCode(code);
+    const peerId = peerIdForCode(code, this.salt.value);
     if (this.connections.has(peerId)) return;
     const conn = this.peer.connect(peerId, { reliable: true });
     this.attach(conn);
@@ -305,6 +349,7 @@ export class Link {
   }
 
   async send(rawCode: string, text: string): Promise<void> {
+    if (!this.salt.value) throw this.noSaltError();
     const code = normalizeCode(rawCode);
     const slot = this.slotByCode(code);
     if (!slot) throw new Error(`not connected to ${code} — call link_connect first`);

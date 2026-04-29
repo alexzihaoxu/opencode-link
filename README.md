@@ -1,6 +1,6 @@
 # opencode-link
 
-Peer-to-peer messaging between [opencode](https://opencode.ai) agents over WebRTC. Each agent gets a 6-character link code; share the code, and two agents on different machines (or two terminals on one machine) can talk directly.
+Peer-to-peer messaging between [opencode](https://opencode.ai) agents over WebRTC. Each agent gets a 6-character link code under a **shared salt** (a group secret); share both, and agents on different machines or different terminals can talk directly.
 
 > **Status: pre-alpha.** Tested on Windows + Bun 1.3 against PeerJS public signaling. macOS x64 / arm64 and Linux x64 / arm64 use the same prebuilt native binary path and should work but haven't been physically verified.
 
@@ -15,14 +15,29 @@ curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/inst
 irm https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/install.ps1 | iex
 ```
 
+After installing, **set a shared salt** — both ends of any conversation must use the same salt or they cannot reach each other.
+
+```bash
+# Pick one of these. The env var wins if both are set.
+
+# Option A: env var (highest priority, ephemeral)
+export OPENCODE_LINK_SALT="$(openssl rand -hex 32)"
+
+# Option B: persisted file (survives shells)
+mkdir -p ~/.config/opencode-link
+openssl rand -hex 32 > ~/.config/opencode-link/salt
+```
+
+Share that salt out of band (Signal, password manager, in-person) with anyone you want to talk to. They set the same value on their machine. Without a salt configured on both sides, no connection can be established — the agent will surface this and ask the user to set one.
+
 Then restart opencode. Manual install, uninstall, and requirements are at the bottom of this README.
 
 ## Try it
 
-Open `opencode` in two terminals — no env vars needed; each launch gets its own random code.
+Once the salt is set on both terminals, plain `opencode` works.
 
 1. In terminal **A**: ask the agent *"what's your link code?"* It calls `link_whoami` and reports something like `A1GH35`.
-2. In terminal **B**: paste A's code and say *"connect to `A1GH35` and send 'hi'."*
+2. In terminal **B** (same salt): paste A's code and say *"connect to `A1GH35` and send 'hi'."*
 3. Terminal **A**'s agent is woken with a new user-side message: `[link from <B's name>] hi`. It can reply by calling `link_send`.
 
 If A is mid-turn when the message lands, opencode queues it behind the in-flight response (same machinery as a user typing while the agent is busy). If no opencode session is bound to the plugin yet, the message sits in an inbox until one binds.
@@ -37,6 +52,18 @@ If A is mid-turn when the message lands, opencode queues it behind the in-flight
 | `link_send`     | `code: string, text: string`    | sends a text message to a connected peer                      |
 | `link_inbox`    | —                               | drains and returns all pending `InboxEntry`s                  |
 | `link_peers`    | —                               | lists currently connected peers (`{ code, name, connectedAt }`) |
+
+`link_whoami` returns:
+
+```ts
+{
+  code: string;            // 6-char A-Z0-9
+  name: string;            // empty until link_set_name has been called
+  salt: "env" | "file" | "none";  // where the salt came from
+  ready: boolean;          // false iff salt is "none" — connections won't work
+  warning?: string;        // only present when ready === false
+}
+```
 
 `InboxEntry` shape:
 
@@ -56,7 +83,7 @@ If A is mid-turn when the message lands, opencode queues it behind the in-flight
 ## How it works
 
 - **Identity.** Every `opencode` process generates a random 6-char code at plugin load. Without `OPENCODE_LINK_PROFILE`, the code lives only in memory — restart and you get a fresh one. With a profile, the code is persisted at `~/.config/opencode-link/identity-<profile>.json` and reused on next launch.
-- **Hashed PeerJS id.** The actual id registered on PeerJS public signaling is `sha256("opencode-link.v1::" + code)` — a 64-char hex string. The salt namespaces opencode-link agents away from random PeerJS users so codes don't collide with unrelated apps, while keeping the user-facing token short enough to type.
+- **Hashed PeerJS id, salted by group secret.** The actual id registered on PeerJS public signaling is `sha256(salt + "|" + code)` — a 64-char hex string. The salt is the **shared group secret** (env var `OPENCODE_LINK_SALT` or file `~/.config/opencode-link/salt`). Only agents using the same salt produce matching hashes and can reach each other. There is no default salt: without one, the plugin refuses to start the peer and any `link_*` tool returns a clear error telling the agent to ask the user to configure one.
 - **Eager peer boot.** The plugin starts the PeerJS peer immediately when opencode loads, not lazily on first tool call. That means an agent is reachable from the moment its terminal is open, even before the user has asked it to do anything link-related.
 - **Connect & wire format.** `link_connect(code)` opens a direct WebRTC data channel via PeerJS. Both sides exchange a `hello` message containing their code + name, then exchange `msg` frames as JSON.
 - **Push delivery.** When a peer message arrives, the plugin calls opencode's `client.session.prompt()` to inject `[link from <name>] <text>` as a new user-side message in the most recently active session. The agent gets woken up the same way a typing user would wake it. Messages are also queued in an in-memory inbox (`link_inbox`) as a fallback for when no session is bound, or for batch reads.
@@ -66,16 +93,27 @@ If A is mid-turn when the message lands, opencode queues it behind the in-flight
 
 All env vars are optional. Plain `opencode` works.
 
-| Variable                | Default                              | Purpose                                                                                                                        |
-| ----------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `OPENCODE_LINK_NAME`    | unset (agent picks one)              | Pre-assign the display name instead of letting the agent self-name on its first link turn.                                      |
-| `OPENCODE_LINK_PROFILE` | unset (fresh code per process)       | Opt into a stable code persisted at `~/.config/opencode-link/identity-<profile>.json`. Same profile next launch = same code.   |
-| `OPENCODE_LINK_HOME`    | `~/.config/opencode-link`            | Override where profile identity files live. Only consulted when `OPENCODE_LINK_PROFILE` is set.                                 |
+| Variable                | Default                              | Purpose                                                                                                                       |
+| ----------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `OPENCODE_LINK_SALT`    | **unset — required**                 | Shared group secret. Hashed with the code to derive the PeerJS id. Falls back to the salt file if unset; if neither, no connection works. |
+| `OPENCODE_LINK_NAME`    | unset (agent picks one)              | Pre-assign the display name instead of letting the agent self-name on its first link turn.                                     |
+| `OPENCODE_LINK_PROFILE` | unset (fresh code per process)       | Opt into a stable code persisted at `~/.config/opencode-link/identity-<profile>.json`. Same profile next launch = same code.  |
+| `OPENCODE_LINK_HOME`    | `~/.config/opencode-link`            | Identity / salt file directory.                                                                                                |
 | `OPENCODE_LINK_HOST`    | PeerJS public cloud (`0.peerjs.com`) | Signaling server hostname.                                                                                                     |
 | `OPENCODE_LINK_PORT`    | `443`                                | Signaling server port.                                                                                                         |
 | `OPENCODE_LINK_PATH`    | `/`                                  | Signaling server path.                                                                                                         |
 | `OPENCODE_LINK_KEY`     | PeerJS default                       | Signaling api key.                                                                                                             |
 | `OPENCODE_LINK_SECURE`  | `true`                               | Use `wss://` instead of `ws://`.                                                                                               |
+
+**Salt** (the security primitive). The salt is a shared secret that scopes who can reach you. Two agents with different salts compute different PeerJS hashes from the same code and simply do not see each other on the signaling server. There is no default — without one, no connection is possible.
+
+Resolution order, highest priority first:
+
+1. `OPENCODE_LINK_SALT` env var (if set and non-empty).
+2. File at `~/.config/opencode-link/salt` (or `$OPENCODE_LINK_HOME/salt`). Plain text, leading/trailing whitespace trimmed.
+3. Neither set → `link.start()` refuses; the agent's system prompt and `link_whoami`'s response both carry a clear "set a salt" message.
+
+Pick a salt with real entropy (e.g. `openssl rand -hex 32`) and treat it like a Wi-Fi PSK: share with the group via a trusted channel, rotate when needed, never paste it where the 6-char code might be screenshotted.
 
 **Profiles.** Codes are random by default — fresh one per `opencode` launch — so two terminals on the same machine never collide. If you want a code that survives restarts (e.g. so a friend's saved code keeps working), give the launch a profile name:
 
@@ -88,7 +126,9 @@ OPENCODE_LINK_PROFILE=alice OPENCODE_LINK_NAME=alice opencode
 
 ## What the agent sees
 
-Each turn, opencode-link's `experimental.chat.system.transform` hook appends a system-prompt block. With code `A1GH35` and an unset display name it looks like:
+opencode-link's `experimental.chat.system.transform` hook appends a system-prompt block on every turn. The content depends on whether a salt is configured.
+
+**With salt configured**, code `A1GH35`, unset display name:
 
 ```
 You have access to opencode-link, a peer-to-peer messaging tool that connects you with other opencode agents over WebRTC.
@@ -97,6 +137,7 @@ Use it when the user asks you to talk to or coordinate with another agent.
 Your identity:
 - Link code (random per session, share with others so they can reach you): A1GH35
 - Display name: NOT SET. Pick a short fun name for yourself and call link_set_name once at the start of any link-related conversation. The user has not assigned one.
+- Namespace salt: configured (from env var OPENCODE_LINK_SALT). You can only reach agents whose salt matches.
 
 Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.
 Codes are 6 characters of A-Z and 0-9 (e.g. `A1GH35`). Anything else is invalid.
@@ -113,7 +154,7 @@ Treat the link as async coordination, not chat. Send only when something substan
 If you suspect background messages may have queued up while you were busy, call link_inbox at the start of your turn.
 ```
 
-Once `link_set_name` has been called, the second line becomes `- Display name: <name>` and the rest is unchanged.
+**Without salt configured**, the block is replaced entirely with onboarding guidance: it explains what a salt is, how to set one (env var or file), recommends `openssl rand -hex 32`, and instructs the agent to surface this to the user before running any link tool. `link_whoami`'s JSON response in this state also carries a `warning` field and `ready: false`, and `link_connect` / `link_send` return an explicit configuration-error string instead of a generic failure.
 
 ## Layout
 

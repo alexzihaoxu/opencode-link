@@ -2,7 +2,7 @@
 // distinct codes, has one connect to the other, sends a message, checks
 // delivery on both sides via inbox.
 
-import type { Identity } from "../src/identity.ts";
+import type { Identity, SaltSource } from "../src/identity.ts";
 import { Link } from "../src/link.ts";
 
 function log(tag: string, ...args: unknown[]) {
@@ -11,11 +11,12 @@ function log(tag: string, ...args: unknown[]) {
 
 const aIdentity: Identity = { code: "TESTAA", name: "alice" };
 const bIdentity: Identity = { code: "TESTBB", name: "bob" };
+const TEST_SALT: SaltSource = { value: `test-salt-${process.pid}`, origin: "env" };
 
 async function main() {
-  log("main", "creating Links");
-  const linkA = new Link(aIdentity);
-  const linkB = new Link(bIdentity);
+  log("main", "creating Links with shared salt");
+  const linkA = new Link(aIdentity, TEST_SALT);
+  const linkB = new Link(bIdentity, TEST_SALT);
 
   await linkA.start();
   log("a", "started");

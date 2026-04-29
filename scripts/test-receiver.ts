@@ -2,15 +2,19 @@
 // messages, prints them. Pair with an opencode session calling
 // link_connect / link_send to verify end-to-end delivery.
 
-import type { Identity } from "../src/identity.ts";
+import type { Identity, SaltSource } from "../src/identity.ts";
 import { Link } from "../src/link.ts";
 
 const identity: Identity = {
   code: process.env.RECEIVER_CODE ?? "RECVAA",
   name: process.env.RECEIVER_NAME ?? "test-receiver",
 };
+const salt: SaltSource = {
+  value: process.env.OPENCODE_LINK_SALT ?? "test-receiver-salt",
+  origin: "env",
+};
 
-const link = new Link(identity);
+const link = new Link(identity, salt);
 await link.start();
 console.log(`READY code=${identity.code} name=${identity.name}`);
 
