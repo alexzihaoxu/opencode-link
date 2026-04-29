@@ -35,17 +35,60 @@ cd "$CONFIG_DIR"
 say "installing opencode-link from github:$REPO#$REF into $CONFIG_DIR"
 bun add "github:$REPO#$REF"
 
-# node-datachannel ships a prebuilt native binary that's fetched by its
-# postinstall script. When opencode-link is installed as a transitive dep,
-# bun does NOT honor our package's trustedDependencies list and the
-# postinstall is silently skipped — leaving us without the .node binary.
-# Run prebuild-install directly so the binary actually lands on disk.
+# node-datachannel ships a prebuilt native binary fetched by its postinstall
+# (prebuild-install). When opencode-link is installed as a transitive dep,
+# bun does NOT honor our package's trustedDependencies and the postinstall
+# is silently skipped — leaving us without the .node binary. Even running
+# `bunx prebuild-install` after the fact has been observed to fail silently
+# on some setups. So we just fetch the tarball directly from GitHub releases:
+# bulletproof, one HTTP GET, no node-side magic.
 ND="$CONFIG_DIR/node_modules/node-datachannel"
-if [ -d "$ND" ] && [ ! -f "$ND/build/Release/node_datachannel.node" ]; then
-  say "fetching node-datachannel prebuilt native binary"
-  if ! ( cd "$ND" && bunx prebuild-install -r napi ); then
-    err "prebuild-install failed. node-datachannel may not have a prebuilt binary for your platform."
-    err "If you have a C++ toolchain available you can build manually:"
+ND_BIN="$ND/build/Release/node_datachannel.node"
+
+fetch_native_binary() {
+  local version platform url
+  version=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$ND/package.json" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+  if [ -z "$version" ]; then err "could not read node-datachannel version"; return 1; fi
+
+  local os arch
+  os=$(uname -s)
+  arch=$(uname -m)
+  case "$os/$arch" in
+    Darwin/arm64)         platform="darwin-arm64" ;;
+    Darwin/x86_64)        platform="darwin-x64" ;;
+    Linux/x86_64)         platform="linux-x64" ;;
+    Linux/aarch64)        platform="linux-arm64" ;;
+    Linux/armv7l|Linux/armv6l) platform="linux-arm" ;;
+    MINGW*/*|MSYS*/*|CYGWIN*/x86_64) platform="win32-x64" ;;
+    MINGW*/aarch64|MSYS*/aarch64) platform="win32-arm64" ;;
+    *) err "unsupported platform: $os/$arch"; return 1 ;;
+  esac
+
+  url="https://github.com/murat-dogan/node-datachannel/releases/download/v${version}/node-datachannel-v${version}-napi-v8-${platform}.tar.gz"
+  say "downloading prebuilt binary: $platform v$version"
+  if ! curl -fsSL "$url" -o /tmp/oc-link-nd.tgz; then
+    err "download failed from $url"
+    return 1
+  fi
+  mkdir -p "$ND/build/Release"
+  if ! tar -xzf /tmp/oc-link-nd.tgz -C "$ND"; then
+    err "tar extraction failed"
+    return 1
+  fi
+  rm -f /tmp/oc-link-nd.tgz
+  if [ ! -f "$ND_BIN" ]; then
+    err "binary not found at expected path after extraction: $ND_BIN"
+    return 1
+  fi
+  return 0
+}
+
+if [ -d "$ND" ] && [ ! -f "$ND_BIN" ]; then
+  if ! fetch_native_binary; then
+    err "Could not install node-datachannel native binary."
+    err "Manual fallback:"
+    err "  cd $ND && bunx prebuild-install -r napi"
+    err "Or build from source (needs CMake + a C++ toolchain):"
     err "  cd $ND && npm run _prebuild"
     exit 1
   fi

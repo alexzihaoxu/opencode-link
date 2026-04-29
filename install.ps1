@@ -34,22 +34,35 @@ try {
     & bun add "github:${repo}#${ref}"
     if ($LASTEXITCODE -ne 0) { throw "bun add failed" }
 
-    # node-datachannel's prebuild-install postinstall is skipped when the
-    # package lands as a transitive dep (bun ignores our trustedDependencies
-    # in that case). Run it directly so the .node binary actually downloads.
+    # node-datachannel's postinstall (prebuild-install) is silently skipped
+    # when the package lands as a transitive dep — bun ignores our
+    # trustedDependencies in that case. Fetch the prebuilt tarball directly
+    # from GitHub releases; bulletproof and no node-side magic.
     $nd = Join-Path $configDir "node_modules\node-datachannel"
     $nodeBin = Join-Path $nd "build\Release\node_datachannel.node"
     if ((Test-Path $nd) -and -not (Test-Path $nodeBin)) {
-        Write-Host "→ fetching node-datachannel prebuilt native binary"
-        Push-Location $nd
+        $ndPkg = Get-Content (Join-Path $nd "package.json") -Raw | ConvertFrom-Json
+        $version = $ndPkg.version
+        $arch = (Get-CimInstance Win32_Processor).Architecture
+        # 9 = arm64 on Windows; 5,12 also arm; 0,9 = x64; default to x64
+        $platform = if ($arch -eq 9 -or $arch -eq 12 -or $env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "win32-arm64" } else { "win32-x64" }
+        $url = "https://github.com/murat-dogan/node-datachannel/releases/download/v$version/node-datachannel-v$version-napi-v8-$platform.tar.gz"
+        $tar = Join-Path $env:TEMP "oc-link-nd.tgz"
+        Write-Host "→ downloading prebuilt binary: $platform v$version"
         try {
-            & bunx prebuild-install -r napi
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "prebuild-install failed. node-datachannel may not have a prebuilt binary for your platform. With a C++ toolchain you can build manually: cd `"$nd`"; npm run _prebuild"
-                exit 1
+            Invoke-WebRequest -Uri $url -OutFile $tar -UseBasicParsing
+            New-Item -ItemType Directory -Path (Join-Path $nd "build\Release") -Force | Out-Null
+            & tar -xzf $tar -C $nd
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $nodeBin)) {
+                throw "tar extraction failed or binary missing at $nodeBin"
             }
+            Remove-Item $tar -ErrorAction SilentlyContinue
         }
-        finally { Pop-Location }
+        catch {
+            Write-Error "Could not install node-datachannel native binary: $_"
+            Write-Error "Manual fallback: cd `"$nd`"; bunx prebuild-install -r napi"
+            exit 1
+        }
     }
 
     $bridge = "export { server } from `"opencode-link`";`n"
