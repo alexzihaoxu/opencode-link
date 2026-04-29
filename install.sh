@@ -35,10 +35,21 @@ cd "$CONFIG_DIR"
 say "installing opencode-link from github:$REPO#$REF into $CONFIG_DIR"
 bun add "github:$REPO#$REF"
 
-# node-datachannel ships a prebuilt native binary that needs explicit trust on
-# bun install. trustedDependencies in our package.json should cover it, but
-# call it again here so the user doesn't have to know the magic command.
-bun pm trust node-datachannel >/dev/null 2>&1 || true
+# node-datachannel ships a prebuilt native binary that's fetched by its
+# postinstall script. When opencode-link is installed as a transitive dep,
+# bun does NOT honor our package's trustedDependencies list and the
+# postinstall is silently skipped — leaving us without the .node binary.
+# Run prebuild-install directly so the binary actually lands on disk.
+ND="$CONFIG_DIR/node_modules/node-datachannel"
+if [ -d "$ND" ] && [ ! -f "$ND/build/Release/node_datachannel.node" ]; then
+  say "fetching node-datachannel prebuilt native binary"
+  if ! ( cd "$ND" && bunx prebuild-install -r napi ); then
+    err "prebuild-install failed. node-datachannel may not have a prebuilt binary for your platform."
+    err "If you have a C++ toolchain available you can build manually:"
+    err "  cd $ND && npm run _prebuild"
+    exit 1
+  fi
+fi
 
 # Drop a one-line bridge file into the plugins directory. opencode auto-loads
 # everything in plugins/, which avoids the npm-name collision we'd hit if we

@@ -34,8 +34,23 @@ try {
     & bun add "github:${repo}#${ref}"
     if ($LASTEXITCODE -ne 0) { throw "bun add failed" }
 
-    # idempotent — ignores failure if already trusted or not present
-    & bun pm trust node-datachannel 2>$null
+    # node-datachannel's prebuild-install postinstall is skipped when the
+    # package lands as a transitive dep (bun ignores our trustedDependencies
+    # in that case). Run it directly so the .node binary actually downloads.
+    $nd = Join-Path $configDir "node_modules\node-datachannel"
+    $nodeBin = Join-Path $nd "build\Release\node_datachannel.node"
+    if ((Test-Path $nd) -and -not (Test-Path $nodeBin)) {
+        Write-Host "→ fetching node-datachannel prebuilt native binary"
+        Push-Location $nd
+        try {
+            & bunx prebuild-install -r napi
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "prebuild-install failed. node-datachannel may not have a prebuilt binary for your platform. With a C++ toolchain you can build manually: cd `"$nd`"; npm run _prebuild"
+                exit 1
+            }
+        }
+        finally { Pop-Location }
+    }
 
     $bridge = "export { server } from `"opencode-link`";`n"
     $bridgePath = Join-Path $pluginsDir "opencode-link.ts"
