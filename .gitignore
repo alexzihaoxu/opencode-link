@@ -1,0 +1,12 @@
+node_modules/
+bun.lockb
+bun.lock
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+/dist/
+/build/
+# Note: lib/peerjs-on-node/dist/ IS tracked — it's the vendored pre-built bundle.

@@ -1,0 +1,26 @@
+{
+  "name": "peerjs-on-node",
+  "version": "1.0.2",
+  "description": "nodejs wrtc + peerjs",
+  "keywords": [
+    "webrtc",
+    "wrtc",
+    "nodejs",
+    "peerjs",
+    "p2p"
+  ],
+  "repository": "https://github.com/Mantaseus/peerjs-on-node",
+  "author": "Mantaseus",
+  "license": "MIT",
+  "scripts": {},
+  "main": "index.js",
+  "devDependencies": {
+    "parcel": "^2.14.4"
+  },
+  "dependencies": {
+    "node-datachannel": "^0.27.0",
+    "web-file-polyfill": "^1.0.4",
+    "filereader": "^0.10.3",
+    "ws": "^7.2.0"
+  }
+}

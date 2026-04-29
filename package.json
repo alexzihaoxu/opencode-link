@@ -1,0 +1,55 @@
+{
+  "name": "opencode-link",
+  "version": "0.0.1",
+  "description": "Peer-to-peer messaging between opencode agents over WebRTC.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "lib",
+    "install.sh",
+    "install.ps1",
+    "uninstall.sh",
+    "uninstall.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexZihaoXu/opencode-link.git"
+  },
+  "homepage": "https://github.com/AlexZihaoXu/opencode-link#readme",
+  "bugs": {
+    "url": "https://github.com/AlexZihaoXu/opencode-link/issues"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:p2p": "bun run scripts/test-p2p.ts"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "peerjs",
+    "webrtc",
+    "p2p",
+    "agent"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "peerjs-on-node": "file:./lib/peerjs-on-node"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "trustedDependencies": [
+    "node-datachannel"
+  ]
+}
