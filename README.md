@@ -129,21 +129,19 @@ All env vars are optional. Plain `opencode` works.
 | `OPENCODE_LINK_KEY`      | PeerJS default                           | Signaling api key                                                                                                            |
 | `OPENCODE_LINK_SECURE`   | `true`                                   | Use `wss://` instead of `ws://`                                                                                              |
 
-The link code is always randomly generated — you don't pick it. Without `OPENCODE_LINK_PROFILE`, every launch gets a fresh one (so two terminals never collide). Set `OPENCODE_LINK_PROFILE=foo` if you want a friend's saved code of yours to keep working across restarts.
-
-The peer id is always a randomly generated UUID — you don't pick it. PeerJS public signaling assigns ids globally, so short labels like `alice` would collide with other users; UUIDs avoid that. To run two opencode terminals on the same machine, give them different profiles so each persists its own UUID:
+The link code is always randomly generated — you don't pick it. Without `OPENCODE_LINK_PROFILE`, every launch gets a fresh 6-char code (so two terminals never collide). Set `OPENCODE_LINK_PROFILE=foo` if you want a friend's saved code of yours to keep working across restarts:
 
 ```bash
-# terminal A
+# terminal A — same code every launch under this profile
 OPENCODE_LINK_PROFILE=alice OPENCODE_LINK_NAME=alice opencode
 
 # terminal B
 OPENCODE_LINK_PROFILE=bob OPENCODE_LINK_NAME=bob opencode
 ```
 
-Each agent calls `link_whoami` to fetch its UUID. Paste A's UUID into B's session and ask: *"connect to peer `<uuid>` and send 'hi'."* A wakes with `[link from bob] hi`.
+Each agent calls `link_whoami` to fetch its 6-char code. Paste A's code into B's session and ask: *"connect to `A1GH35` and send 'hi'."* A wakes with `[link from bob] hi`.
 
-To self-host signaling, run [`peerjs-server`](https://github.com/peers/peerjs-server) and point the env vars at it. WebRTC media itself is still peer-to-peer; the signaling server only carries the initial handshake.
+To self-host signaling, run [`peerjs-server`](https://github.com/peers/peerjs-server) and point the env vars at it. WebRTC media itself is still peer-to-peer; the signaling server only carries the initial handshake (offer/answer/ICE) on top of which the data channel runs directly between agents.
 
 ## What the agent sees
 
@@ -154,14 +152,21 @@ You have access to opencode-link, a peer-to-peer messaging tool that connects yo
 Use it when the user asks you to talk to or coordinate with another agent.
 
 Your identity:
-- Peer ID (stable, share with others so they can reach you): <uuid>
-- Display name (mutable label others see): <name>
+- Link code (random per session, share with others so they can reach you): A1GH35
+- Display name: <name>  (or instructions to pick one if unset)
 
-Tools: link_whoami, link_set_name(name), link_connect(peerId), link_send(peerId, text), link_inbox, link_peers.
+Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.
+Codes are 6 characters of A-Z and 0-9 (e.g. `A1GH35`). Anything else is invalid.
 
-Incoming messages from peers arrive as new user-side messages prefixed `[link from <name>]`.
-When you see one, the turn was triggered by another agent, not the human user.
-Reply by calling link_send with that peer's id — do not respond in plain output, the user won't see it routed back.
+Incoming peer messages arrive as new user-side messages prefixed `[link from <name>]`. They are not from the human — they are from another agent.
+
+When to reply via link_send (and only via link_send — plain output is not routed back):
+- Reply when you have a real answer, question, status update, or new information to deliver.
+- Do NOT reply to acknowledgments, 'understood', 'thanks', 'ok', or other purely social/closing messages. Replying just bounces another ack back and creates an infinite politeness loop.
+- Do NOT repeat what you said in your previous turn.
+- Silence is a valid response. If the exchange has reached a natural close, stop calling link_send.
+
+Treat the link as async coordination, not chat. Send only when something substantive needs to cross.
 If you suspect background messages may have queued up while you were busy, call link_inbox at the start of your turn.
 ```
 
@@ -171,15 +176,16 @@ This re-renders each turn, so renaming via `link_set_name` is reflected immediat
 
 ```
 src/
-  identity.ts   # UUID + name persistence
+  identity.ts   # 6-char code generation + per-profile persistence
   link.ts       # PeerJS wrapper, connection map, inbox queue, push delivery
   tools.ts      # @opencode-ai/plugin tool() bindings (each binds session id from ctx)
   index.ts      # plugin entry — boots Link, registers tools, system.transform + event hooks
 lib/
-  peerjs-on-node/   # vendored fork (committed pre-built dist)
+  peerjs-on-node/   # vendored fork (committed pre-built dist, see NOTICE.md)
 scripts/
-  test-p2p.ts   # raw two-peer round-trip (peerjs-on-node directly)
-  test-link.ts  # round-trip exercising the Link class end-to-end
+  test-p2p.ts       # raw two-peer round-trip (peerjs-on-node directly)
+  test-link.ts      # round-trip exercising the Link class end-to-end via codes
+  test-receiver.ts  # background receiver for opencode↔bun integration testing
 ```
 
 Run the tests with `bun run scripts/test-p2p.ts` and `bun run scripts/test-link.ts`. Both contact the public PeerJS signaling server, so they need internet.
@@ -187,9 +193,9 @@ Run the tests with `bun run scripts/test-p2p.ts` and `bun run scripts/test-link.
 ## Roadmap
 
 - [ ] Wire-protocol versioning so future message kinds don't break older peers.
-- [ ] `link_disconnect(peerId)`.
-- [ ] Optional encryption layer (NaCl box) so PeerJS signaling traffic doesn't leak names.
-- [ ] Discovery/directory mode — connect by name to an agent in a known group rather than by raw id.
+- [ ] `link_disconnect(code)`.
+- [ ] Optional encryption layer (NaCl box) so payloads aren't readable by the signaling relay if it's TURN-fallback'd.
+- [ ] Discovery/directory mode — connect by name to an agent in a known group rather than by raw code.
 - [ ] File transfer (chunked binary messages).
 
 ## License
