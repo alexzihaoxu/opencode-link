@@ -44,10 +44,15 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
   const link = new Link(identity, salt);
   link.setClient(input.client);
 
-  // If a salt is configured, eagerly boot the peer so this agent is reachable
-  // from the moment opencode loads. If no salt is set, link.start() throws and
-  // we just log it — tools will surface the configuration error to the agent.
-  if (salt.value) {
+  // Eager peer boot (loading peerjs-on-node + node-datachannel native binding)
+  // is opt-in via OPENCODE_LINK_EAGER=1. Bun on Windows panics during native-
+  // module unload if node-datachannel was loaded — even on a clean ctrl+c
+  // before any link tool was used. Default to lazy: the peer boots when the
+  // agent first calls a link tool. Tradeoff: a receiving agent isn't on the
+  // signaling server until something on its side touches the link, so peers
+  // can't connect to a brand-new opencode session until the agent runs at
+  // least one link_* tool (the system prompt nudges it to call link_whoami).
+  if (salt.value && process.env.OPENCODE_LINK_EAGER === "1") {
     void link.start().catch((err: Error) => {
       (input.client as any)?.app?.log?.({
         service: "opencode-link",
