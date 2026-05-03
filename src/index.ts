@@ -15,16 +15,18 @@ function installShutdown(): void {
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    // Hard tear-down of libdatachannel from underneath any in-flight
-    // connections. We deliberately do NOT call peer.destroy() / conn.close()
-    // first — those go through the WebRTC graceful-close path which fires
-    // datachannel error events back to JS just as the JS engine is shutting
-    // down, producing a NAPI panic on process exit. cleanup() bypasses that
-    // by yanking the native side directly. Idempotent: safe to call from
-    // multiple lifecycle events.
+    // Only call node-datachannel.cleanup() if the module was ALREADY loaded
+    // (i.e. the user actually used a link tool with a salt configured).
+    // Calling require() here when nothing previously loaded peerjs-on-node
+    // would *force* the native binding to load just to immediately tear it
+    // down — and that round-trip is itself what triggers the NAPI panic on
+    // bare-launch ctrl+c, when no salt is set and the plugin was inert.
     try {
-      const nd = require("node-datachannel");
-      nd?.cleanup?.();
+      const ndPath = require.resolve("node-datachannel");
+      if (require.cache?.[ndPath]) {
+        const nd = require("node-datachannel");
+        nd?.cleanup?.();
+      }
     } catch {}
   };
 
