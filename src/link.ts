@@ -62,6 +62,9 @@ interface ConnSlot {
   connectedAt: number;
 }
 
+/** Cap on the in-memory inbox so a flood of messages can't exhaust memory. */
+const INBOX_MAX = 1024;
+
 export class Link {
   private peer: any | null = null;
   /** Keyed by remote PeerJS id (the sha256 hash of their code). */
@@ -114,7 +117,10 @@ export class Link {
     if (kind === "deleted") {
       this.sessions.delete(sessionId);
       if (this.lastSessionId === sessionId) {
-        this.lastSessionId = this.sessions.values().next().value ?? null;
+        // Don't fall back to a random other session — Set iteration order is
+        // insertion order, not recency. Clear and wait for the next
+        // bindSession / noteSession to establish a real "last active".
+        this.lastSessionId = null;
       }
       return;
     }
@@ -189,7 +195,12 @@ export class Link {
   async start(): Promise<void> {
     if (!this.salt.value) throw this.noSaltError();
     if (this.ready) return this.ready;
-    this.ready = this.bootPeer();
+    // Reset `ready` on failure so the next call retries instead of inheriting
+    // a permanently-rejected promise (e.g. transient PeerJS signaling outage).
+    this.ready = this.bootPeer().catch((err) => {
+      this.ready = null;
+      throw err;
+    });
     return this.ready;
   }
 
@@ -228,12 +239,21 @@ export class Link {
       });
     });
 
+    const labelFor = (s: ConnSlot | undefined): string =>
+      s?.name || s?.code || conn.peer.slice(0, 8);
+    const enqueue = (entry: InboxEntry) => {
+      this.inboxQueue.push(entry);
+      // Bound the inbox: drop the oldest entries on overflow rather than
+      // letting a chatty/malicious peer grow memory unboundedly.
+      if (this.inboxQueue.length > INBOX_MAX) {
+        this.inboxQueue.splice(0, this.inboxQueue.length - INBOX_MAX);
+      }
+    };
+
     conn.on("data", (raw: unknown) => {
       const msg = this.parse(raw);
       if (!msg) return;
       const slot = this.connections.get(conn.peer);
-      const labelFor = (s: ConnSlot | undefined, fallback?: string) =>
-        s?.name || s?.code || fallback || conn.peer.slice(0, 8);
       switch (msg.type) {
         case "hello": {
           if (slot) {
@@ -241,7 +261,7 @@ export class Link {
             slot.name = msg.name;
           }
           const label = msg.name || msg.code;
-          this.inboxQueue.push({
+          enqueue({
             from: msg.code,
             fromName: label,
             text: `connected as ${label}`,
@@ -252,8 +272,8 @@ export class Link {
         }
         case "rename": {
           if (slot) slot.name = msg.name;
-          const label = msg.name || (slot?.code ?? labelFor(slot));
-          this.inboxQueue.push({
+          const label = msg.name || labelFor(slot);
+          enqueue({
             from: slot?.code ?? "",
             fromName: label,
             text: `renamed to ${label}`,
@@ -265,7 +285,7 @@ export class Link {
         case "msg": {
           const fromCode = slot?.code ?? "";
           const fromName = labelFor(slot);
-          this.inboxQueue.push({
+          enqueue({
             from: fromCode,
             fromName,
             text: msg.text,

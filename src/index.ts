@@ -7,33 +7,34 @@ import { buildTools } from "./tools.ts";
 const require = createRequire(import.meta.url);
 
 let shutdownInstalled = false;
-function installShutdown(link: Link): void {
+function installShutdown(): void {
   if (shutdownInstalled) return;
   shutdownInstalled = true;
 
-  let shuttingDown = false;
-  const shutdown = (signal: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    try {
-      void link.stop();
-    } catch {}
-    // node-datachannel needs an explicit cleanup() before the native module
-    // is unloaded, otherwise its NAPI finalizer panics on process exit.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    // Hard tear-down of libdatachannel from underneath any in-flight
+    // connections. We deliberately do NOT call peer.destroy() / conn.close()
+    // first — those go through the WebRTC graceful-close path which fires
+    // datachannel error events back to JS just as the JS engine is shutting
+    // down, producing a NAPI panic on process exit. cleanup() bypasses that
+    // by yanking the native side directly. Idempotent: safe to call from
+    // multiple lifecycle events.
     try {
       const nd = require("node-datachannel");
       nd?.cleanup?.();
     } catch {}
-    if (signal === "SIGINT" || signal === "SIGTERM") {
-      // Re-emit so the host (opencode) can do its own cleanup and exit.
-      setImmediate(() => process.exit(signal === "SIGINT" ? 130 : 143));
-    }
   };
 
-  process.once("SIGINT", () => shutdown("SIGINT"));
-  process.once("SIGTERM", () => shutdown("SIGTERM"));
-  process.once("beforeExit", () => shutdown("beforeExit"));
-  process.once("exit", () => shutdown("exit"));
+  // Cover every termination path Bun emits. We run cleanup on the FIRST one
+  // that fires; the rest no-op via the `cleaned` guard.
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
+  process.on("beforeExit", cleanup);
+  process.on("exit", cleanup);
 }
 
 export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
@@ -54,7 +55,7 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
     });
   }
 
-  installShutdown(link);
+  installShutdown();
 
   return {
     tool: buildTools(link),
