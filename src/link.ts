@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import {
+  generateCode,
   peerIdForCode,
   persist,
   normalizeCode,
@@ -50,7 +51,11 @@ function envOptions(): LinkOptions {
 }
 
 interface PendingPush {
+  /** Either a regular peer message ("msg") or a link-event notification ("event"). */
+  kind: "msg" | "event";
+  /** For msg: remote's code. For event: empty. */
   fromCode: string;
+  /** For msg: remote's name (or code fallback). For event: empty. */
   fromName: string;
   text: string;
 }
@@ -200,16 +205,20 @@ export class Link {
     lines.push(
       `- Namespace salt: configured (from ${this.salt.origin === "env" ? "env var OPENCODE_LINK_SALT" : "salt file"}). You can only reach agents whose salt matches.`,
       "",
-      "Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.",
+      "Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers, link_rotate.",
       "Codes are 6 characters of A-Z and 0-9 (e.g. `A1GH35`). Anything else is invalid.",
       "",
-      "Incoming peer messages arrive as new user-side messages prefixed `[link from <name>]`. They are not from the human — they are from another agent.",
+      "Two kinds of system-pushed user-side messages can arrive:",
+      "- `[link from <name>] <text>` — a peer agent sent you a message. Reply via link_send.",
+      "- `[link event] <text>` — a notification from the link itself (peer connected/disconnected, signaling reconnected, code rotated, machine rebooted). DO NOT reply via link_send — these are FYI for you to mention to the human if relevant. They are not user input.",
       "",
       "When to reply via link_send (and only via link_send — plain output is not routed back):",
       "- Reply when you have a real answer, question, status update, or new information to deliver.",
       "- Do NOT reply to acknowledgments, 'understood', 'thanks', 'ok', or other purely social/closing messages. They end the exchange. Replying just bounces another ack back and creates an infinite politeness loop.",
       "- Do NOT reply if you already said the same thing in your previous turn.",
       "- Silence is a valid response. If the exchange has reached a natural close, stop calling link_send.",
+      "",
+      "Code rotation: link_rotate generates a fresh code and re-registers under it. Existing connections drop. Use it if the current code leaked or the user wants a clean identity. Tell the user the new code so they can re-share it.",
       "",
       "Treat the link as async coordination, not chat. Send only when something substantive needs to cross.",
       "If you suspect background messages may have queued up while you were busy, call link_inbox at the start of your turn."
@@ -253,6 +262,28 @@ export class Link {
     });
 
     this.peer.on("connection", (conn: any) => this.attach(conn));
+
+    // Auto-reconnect signaling if PeerJS public cloud drops the WS (idle
+    // timeout, brief network blip). Existing WebRTC data channels keep
+    // working, but new connections need signaling. Notify the agent on
+    // both legs so it knows we briefly went offline.
+    this.peer.on("disconnected", () => {
+      if (!this.peer || this.peer.destroyed) return;
+      this.pushEvent("signaling disconnected — attempting reconnect");
+      try {
+        this.peer.reconnect();
+      } catch {}
+    });
+    let reconnectingAnnounced = false;
+    this.peer.on("open", () => {
+      if (reconnectingAnnounced) {
+        this.pushEvent("signaling reconnected");
+        reconnectingAnnounced = false;
+      }
+    });
+    this.peer.on("disconnected", () => {
+      reconnectingAnnounced = true;
+    });
   }
 
   private attach(conn: any): void {
@@ -299,10 +330,12 @@ export class Link {
             ts: Date.now(),
             kind: "system",
           });
+          this.pushEvent(`peer ${label} (${msg.code}) connected`);
           this.notifyStateChange();
           break;
         }
         case "rename": {
+          const oldLabel = labelFor(slot);
           if (slot) slot.name = msg.name;
           const label = msg.name || labelFor(slot);
           enqueue({
@@ -312,6 +345,7 @@ export class Link {
             ts: Date.now(),
             kind: "system",
           });
+          this.pushEvent(`peer ${oldLabel} renamed to ${label}`);
           this.notifyStateChange();
           break;
         }
@@ -325,14 +359,17 @@ export class Link {
             ts: Date.now(),
             kind: "msg",
           });
-          this.deliver({ fromCode, fromName, text: msg.text });
+          this.deliver({ kind: "msg", fromCode, fromName, text: msg.text });
           break;
         }
       }
     });
 
     conn.on("close", () => {
+      const slot = this.connections.get(conn.peer);
+      const label = slot?.name || slot?.code || conn.peer.slice(0, 8);
       this.connections.delete(conn.peer);
+      if (slot?.code) this.pushEvent(`peer ${label} (${slot.code}) disconnected`);
       this.notifyStateChange();
     });
 
@@ -340,6 +377,34 @@ export class Link {
       this.connections.delete(conn.peer);
       this.notifyStateChange();
     });
+  }
+
+  /**
+   * Public hook for index.ts to report an OS-reboot detection. Pushes the
+   * notification through the same event pathway as connection events.
+   */
+  notifyReboot(offlineFor: string): void {
+    this.pushEvent(`local machine appears to have rebooted while opencode was off (gap: ${offlineFor})`);
+  }
+
+  /**
+   * Push a system-event notification into the active session and into the
+   * inbox. Used for connection state changes, code rotation, signaling
+   * reconnect, OS reboot detection, etc. — things the agent should know
+   * about even if no remote peer sent a message.
+   */
+  private pushEvent(text: string): void {
+    this.inboxQueue.push({
+      from: "",
+      fromName: "link",
+      text,
+      ts: Date.now(),
+      kind: "system",
+    });
+    if (this.inboxQueue.length > INBOX_MAX) {
+      this.inboxQueue.splice(0, this.inboxQueue.length - INBOX_MAX);
+    }
+    this.deliver({ kind: "event", fromCode: "", fromName: "", text });
   }
 
   private parse(raw: unknown): WireMessage | null {
@@ -378,7 +443,10 @@ export class Link {
 
   private async pushToSession(sessionId: string, push: PendingPush): Promise<void> {
     if (!this.client?.session?.prompt) return;
-    const text = `[link from ${push.fromName}] ${push.text}`;
+    const text =
+      push.kind === "event"
+        ? `[link event] ${push.text}`
+        : `[link from ${push.fromName}] ${push.text}`;
     const body: Record<string, unknown> = {
       parts: [{ type: "text", text }],
     };
@@ -501,6 +569,33 @@ export class Link {
       this.sendWire(slot.conn, { type: "rename", name });
     }
     this.notifyStateChange();
+  }
+
+  /**
+   * Generate a new link code and re-register on signaling under the new
+   * hash. Existing connections drop (their addressing is the old hash).
+   * Returns the new code so the caller can show it to the user.
+   */
+  async rotateCode(): Promise<string> {
+    if (!this.salt.value) throw this.noSaltError();
+    const oldCode = this.identity.code;
+    const newCode = generateCode();
+    this.identity.code = newCode;
+    await persist(this.identity);
+
+    // Tear down the existing peer (active conns drop, signaling WS closes).
+    if (this.peer) {
+      try { this.peer.destroy(); } catch {}
+      this.peer = null;
+    }
+    this.connections.clear();
+    this.ready = null;
+
+    // Rebuild under the new hash.
+    await this.start();
+    this.pushEvent(`your link code rotated: ${oldCode} → ${newCode}`);
+    this.notifyStateChange();
+    return newCode;
   }
 
   async stop(): Promise<void> {

@@ -94,5 +94,17 @@ export function buildTools(link: Link) {
         return JSON.stringify(link.peers());
       },
     }),
+
+    link_rotate: tool({
+      description: "Rotate this agent's link code. Generates a fresh 6-char code, re-registers on signaling under it, and drops any existing connections (their addressing used the old code). Useful if the current code has leaked or the user wants a clean identity. Returns the new code.",
+      args: {},
+      async execute(_args, ctx) {
+        bind(ctx);
+        return requirePeer(async () => {
+          const newCode = await link.rotateCode();
+          return `rotated link code; new code is ${newCode}`;
+        });
+      },
+    }),
   };
 }

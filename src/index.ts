@@ -1,9 +1,10 @@
 import { createRequire } from "node:module";
+import { uptime as osUptime } from "node:os";
 import type { Plugin, PluginInput, Hooks } from "@opencode-ai/plugin";
 import { loadIdentity, loadSalt } from "./identity.ts";
 import { Link } from "./link.ts";
 import { buildTools } from "./tools.ts";
-import { writeState } from "./state.ts";
+import { readState, writeState } from "./state.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -58,6 +59,29 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
   link.setStateChangeHandler(() => {
     void writeState(link.toState()).catch(() => {});
   });
+
+  // Detect OS reboot since last plugin run. If the previous state file's
+  // timestamp is older than the current OS uptime would allow (i.e. the
+  // gap between then-and-now is larger than how long the OS has been up),
+  // the box must have been off in between. Surface that to the agent so
+  // it has context — useful when a long-running session resumes after a
+  // reboot. Best-effort; failures are silent.
+  void (async () => {
+    const prev = await readState();
+    if (!prev) return;
+    const now = Date.now();
+    const offlineFor = now - prev.updatedAt;
+    const uptimeMs = osUptime() * 1000;
+    if (offlineFor > uptimeMs + 30_000) {
+      const seconds = Math.round(offlineFor / 1000);
+      const human =
+        seconds < 60 ? `${seconds}s`
+        : seconds < 3600 ? `${Math.round(seconds / 60)}m`
+        : `${Math.round(seconds / 3600)}h`;
+      // Fire after a tick so any session bind happens first.
+      setTimeout(() => link.notifyReboot(human), 500);
+    }
+  })().catch(() => {});
 
   if (salt.value && process.env.OPENCODE_LINK_EAGER === "1") {
     void link.start().catch((err: Error) => {
