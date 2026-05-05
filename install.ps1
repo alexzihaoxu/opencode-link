@@ -65,9 +65,11 @@ try {
         }
     }
 
-    $bridge = "export { server } from `"opencode-link`";`n"
-    $bridgePath = Join-Path $pluginsDir "opencode-link.ts"
-    Set-Content -Path $bridgePath -Value $bridge -NoNewline -Encoding utf8
+    $serverBridge = "export { server } from `"opencode-link`";`n"
+    Set-Content -Path (Join-Path $pluginsDir "opencode-link.ts") -Value $serverBridge -NoNewline -Encoding utf8
+
+    $tuiBridge = "export { default } from `"opencode-link/tui`";`n"
+    Set-Content -Path (Join-Path $pluginsDir "opencode-link-tui.ts") -Value $tuiBridge -NoNewline -Encoding utf8
 }
 finally {
     Pop-Location
@@ -75,8 +77,9 @@ finally {
 
 Write-Host "✓ opencode-link installed."
 Write-Host ""
-Write-Host "  package : $configDir\node_modules\opencode-link"
-Write-Host "  bridge  : $configDir\plugins\opencode-link.ts"
+Write-Host "  package      : $configDir\node_modules\opencode-link"
+Write-Host "  server bridge: $configDir\plugins\opencode-link.ts"
+Write-Host "  tui bridge   : $configDir\plugins\opencode-link-tui.ts"
 Write-Host ""
 Write-Host "Restart opencode (or open a new session) to load it."
-Write-Host "Uninstall: cd `"$configDir`" && bun remove opencode-link && rm plugins\opencode-link.ts"
+Write-Host "Uninstall: cd `"$configDir`" && bun remove opencode-link && rm plugins\opencode-link*.ts"

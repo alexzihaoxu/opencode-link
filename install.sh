@@ -94,18 +94,27 @@ if [ -d "$ND" ] && [ ! -f "$ND_BIN" ]; then
   fi
 fi
 
-# Drop a one-line bridge file into the plugins directory. opencode auto-loads
-# everything in plugins/, which avoids the npm-name collision we'd hit if we
-# tried to put "opencode-link" in the plugin array of opencode.jsonc.
+# Drop bridge files into the plugins directory. opencode auto-loads everything
+# in plugins/, which avoids the npm-name collision we'd hit if we tried to put
+# "opencode-link" in the plugin array of opencode.jsonc.
+#
+# Two bridges because the server plugin and the TUI sidebar plugin are
+# mutually-exclusive module shapes in @opencode-ai/plugin's types
+# (PluginModule vs TuiPluginModule).
 cat > "$CONFIG_DIR/plugins/opencode-link.ts" <<'EOF'
 export { server } from "opencode-link";
 EOF
 
+cat > "$CONFIG_DIR/plugins/opencode-link-tui.ts" <<'EOF'
+export { default } from "opencode-link/tui";
+EOF
+
 ok "opencode-link installed."
 echo
-echo "  package : $CONFIG_DIR/node_modules/opencode-link"
-echo "  bridge  : $CONFIG_DIR/plugins/opencode-link.ts"
+echo "  package      : $CONFIG_DIR/node_modules/opencode-link"
+echo "  server bridge: $CONFIG_DIR/plugins/opencode-link.ts"
+echo "  tui bridge   : $CONFIG_DIR/plugins/opencode-link-tui.ts"
 echo
 echo "Restart opencode (or open a new session) to load it."
 echo "To upgrade, re-run this installer. To uninstall:"
-echo "  cd \"$CONFIG_DIR\" && bun remove opencode-link && rm plugins/opencode-link.ts"
+echo "  cd \"$CONFIG_DIR\" && bun remove opencode-link && rm plugins/opencode-link*.ts"

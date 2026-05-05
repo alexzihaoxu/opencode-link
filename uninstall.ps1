@@ -29,15 +29,28 @@ try {
         Write-Host "  (already gone)"
     }
 
-    # 2. Remove the bridge file
-    $bridge = Join-Path $configDir "plugins\opencode-link.ts"
-    if (Test-Path $bridge) {
-        Write-Host "→ removing $bridge"
-        Remove-Item -Force $bridge
+    # 2. Remove the bridge files
+    $bridges = @(
+        (Join-Path $configDir "plugins\opencode-link.ts"),
+        (Join-Path $configDir "plugins\opencode-link-tui.ts")
+    )
+    $removedAny = $false
+    foreach ($b in $bridges) {
+        if (Test-Path $b) {
+            Write-Host "→ removing $b"
+            Remove-Item -Force $b
+            $removedAny = $true
+        }
     }
-    else {
-        Write-Host "→ plugin bridge file"
+    if (-not $removedAny) {
+        Write-Host "→ plugin bridge files"
         Write-Host "  (already gone)"
+    }
+
+    # 2b. Remove the state file (regenerated on next launch).
+    $stateFile = Join-Path $linkHome "state.json"
+    if (Test-Path $stateFile) {
+        Remove-Item -Force $stateFile -ErrorAction SilentlyContinue
     }
 
     # 3. Optionally remove identity files

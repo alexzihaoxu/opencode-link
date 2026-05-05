@@ -3,6 +3,7 @@ import type { Plugin, PluginInput, Hooks } from "@opencode-ai/plugin";
 import { loadIdentity, loadSalt } from "./identity.ts";
 import { Link } from "./link.ts";
 import { buildTools } from "./tools.ts";
+import { writeState } from "./state.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -52,6 +53,12 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // signaling server until something on its side touches the link, so peers
   // can't connect to a brand-new opencode session until the agent runs at
   // least one link_* tool (the system prompt nudges it to call link_whoami).
+  // Mirror Link state to ~/.config/opencode-link/state.json so the TUI plugin
+  // (separate process / module) can render a sidebar panel without IPC.
+  link.setStateChangeHandler(() => {
+    void writeState(link.toState()).catch(() => {});
+  });
+
   if (salt.value && process.env.OPENCODE_LINK_EAGER === "1") {
     void link.start().catch((err: Error) => {
       (input.client as any)?.app?.log?.({

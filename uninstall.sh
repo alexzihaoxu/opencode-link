@@ -32,14 +32,24 @@ else
   skip
 fi
 
-# 2. Remove the bridge file.
-BRIDGE="$CONFIG_DIR/plugins/opencode-link.ts"
-if [ -f "$BRIDGE" ]; then
-  say "removing $BRIDGE"
-  rm -f "$BRIDGE"
-else
-  say "plugin bridge file"
+# 2. Remove the bridge files.
+removed_any=0
+for B in "$CONFIG_DIR/plugins/opencode-link.ts" "$CONFIG_DIR/plugins/opencode-link-tui.ts"; do
+  if [ -f "$B" ]; then
+    say "removing $B"
+    rm -f "$B"
+    removed_any=1
+  fi
+done
+if [ "$removed_any" = "0" ]; then
+  say "plugin bridge files"
   skip
+fi
+
+# 2b. Remove the state file (contains code/name/peers; harmless to leave but clean is nicer).
+STATE="$LINK_HOME/state.json"
+if [ -f "$STATE" ]; then
+  rm -f "$STATE"
 fi
 
 # 3. Optionally remove identity files. Only ask if running interactively.

@@ -7,6 +7,7 @@ import {
   type Identity,
   type SaltSource,
 } from "./identity.ts";
+import { saltPreview, type LinkState } from "./state.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -87,6 +88,9 @@ export class Link {
     { providerID: string; modelID: string; agent?: string }
   >();
 
+  /** Optional callback fired whenever externally-visible state changes. */
+  private onStateChange: (() => void) | null = null;
+
   constructor(
     public readonly identity: Identity,
     public readonly salt: SaltSource,
@@ -95,6 +99,33 @@ export class Link {
 
   setClient(client: any): void {
     this.client = client;
+  }
+
+  setStateChangeHandler(cb: () => void): void {
+    this.onStateChange = cb;
+    // Fire once immediately so the consumer gets the initial snapshot.
+    try { cb(); } catch {}
+  }
+
+  private notifyStateChange(): void {
+    if (this.onStateChange) {
+      try { this.onStateChange(); } catch {}
+    }
+  }
+
+  toState(): LinkState {
+    return {
+      code: this.identity.code,
+      name: this.identity.name,
+      salt: {
+        origin: this.salt.origin,
+        preview: saltPreview(this.salt.value),
+      },
+      ready: this.salt.value !== null,
+      peers: this.peers().map((p) => ({ code: p.code, name: p.name })),
+      saltFilePath: saltFilePath(),
+      updatedAt: Date.now(),
+    };
   }
 
   bindSession(sessionId: string | undefined): void {
@@ -268,6 +299,7 @@ export class Link {
             ts: Date.now(),
             kind: "system",
           });
+          this.notifyStateChange();
           break;
         }
         case "rename": {
@@ -280,6 +312,7 @@ export class Link {
             ts: Date.now(),
             kind: "system",
           });
+          this.notifyStateChange();
           break;
         }
         case "msg": {
@@ -300,10 +333,12 @@ export class Link {
 
     conn.on("close", () => {
       this.connections.delete(conn.peer);
+      this.notifyStateChange();
     });
 
     conn.on("error", () => {
       this.connections.delete(conn.peer);
+      this.notifyStateChange();
     });
   }
 
@@ -426,6 +461,7 @@ export class Link {
     for (const slot of this.connections.values()) {
       this.sendWire(slot.conn, { type: "rename", name });
     }
+    this.notifyStateChange();
   }
 
   async stop(): Promise<void> {
