@@ -408,15 +408,54 @@ export class Link {
     return this.connections.get(peerId) ?? null;
   }
 
+  /**
+   * Re-attach the signaling WebSocket if PeerJS dropped it. Idle peers on the
+   * public cloud get cut after a few minutes; established WebRTC data
+   * channels continue working but `peer.connect()` returns undefined for new
+   * codes until signaling is back.
+   */
+  private async ensureSignalingOpen(): Promise<void> {
+    if (!this.peer || this.peer.destroyed) return;
+    if (!this.peer.disconnected) return;
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(
+        () => reject(new Error("signaling reconnect timed out — try again or restart opencode")),
+        5000,
+      );
+      this.peer.once("open", () => {
+        clearTimeout(t);
+        resolve();
+      });
+      this.peer.once("error", (err: Error) => {
+        clearTimeout(t);
+        reject(err);
+      });
+      try {
+        this.peer.reconnect();
+      } catch (err) {
+        clearTimeout(t);
+        reject(err as Error);
+      }
+    });
+  }
+
   async connect(rawCode: string): Promise<void> {
     if (!this.salt.value) throw this.noSaltError();
     const code = normalizeCode(rawCode);
     if (code.length !== 6) throw new Error(`invalid code "${rawCode}" — expected 6 chars of A-Z and 0-9`);
     if (code === this.identity.code) throw new Error(`cannot connect to your own code`);
     await this.start();
+    await this.ensureSignalingOpen();
     const peerId = peerIdForCode(code, this.salt.value);
     if (this.connections.has(peerId)) return;
     const conn = this.peer.connect(peerId, { reliable: true });
+    if (!conn) {
+      // peerjs.connect returns undefined when peer is disconnected/destroyed
+      // even after a reconnect attempt — treat as a hard failure.
+      throw new Error(
+        `peer.connect returned undefined for ${code}. Signaling channel is unavailable; restart opencode if this persists.`,
+      );
+    }
     this.attach(conn);
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`connect to ${code} timed out — is the other side running?`)), 15000);
