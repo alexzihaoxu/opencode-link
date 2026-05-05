@@ -108,8 +108,9 @@ export class Link {
 
   setStateChangeHandler(cb: () => void): void {
     this.onStateChange = cb;
-    // Fire once immediately so the consumer gets the initial snapshot.
-    try { cb(); } catch {}
+    // Note: deliberately does NOT fire the callback immediately. The consumer
+    // is responsible for capturing any prior state before subscribing —
+    // otherwise we'd race writing a fresh state against any same-tick reads.
   }
 
   private notifyStateChange(): void {
@@ -254,35 +255,44 @@ export class Link {
     const mod = require("peerjs-on-node");
     const Peer = mod.Peer ?? mod.default?.Peer ?? mod;
     const myPeerId = peerIdForCode(this.identity.code, this.salt.value);
-    this.peer = new Peer(myPeerId, this.options);
+    const myPeer = new Peer(myPeerId, this.options);
+    this.peer = myPeer;
 
+    // Capture myPeer in every handler closure so a future rotateCode (which
+    // assigns this.peer to a new instance) leaves these old handlers inert
+    // even if peerjs emits stragglers from the destroyed peer.
+    const isCurrent = () => this.peer === myPeer && !myPeer.destroyed;
+
+    // Wait for the initial open. once() auto-detaches so these listeners
+    // don't linger past first fire.
     await new Promise<void>((resolve, reject) => {
-      this.peer.on("open", () => resolve());
-      this.peer.on("error", (err: Error) => reject(err));
+      myPeer.once("open", () => resolve());
+      myPeer.once("error", (err: Error) => reject(err));
     });
 
-    this.peer.on("connection", (conn: any) => this.attach(conn));
+    myPeer.on("connection", (conn: any) => {
+      if (!isCurrent()) return;
+      this.attach(conn);
+    });
 
     // Auto-reconnect signaling if PeerJS public cloud drops the WS (idle
     // timeout, brief network blip). Existing WebRTC data channels keep
-    // working, but new connections need signaling. Notify the agent on
-    // both legs so it knows we briefly went offline.
-    this.peer.on("disconnected", () => {
-      if (!this.peer || this.peer.destroyed) return;
+    // working, but new connections need signaling.
+    let reconnectingAnnounced = false;
+    myPeer.on("disconnected", () => {
+      if (!isCurrent()) return;
+      reconnectingAnnounced = true;
       this.pushEvent("signaling disconnected — attempting reconnect");
       try {
-        this.peer.reconnect();
+        myPeer.reconnect();
       } catch {}
     });
-    let reconnectingAnnounced = false;
-    this.peer.on("open", () => {
+    myPeer.on("open", () => {
+      if (!isCurrent()) return;
       if (reconnectingAnnounced) {
         this.pushEvent("signaling reconnected");
         reconnectingAnnounced = false;
       }
-    });
-    this.peer.on("disconnected", () => {
-      reconnectingAnnounced = true;
     });
   }
 
@@ -323,14 +333,7 @@ export class Link {
             slot.name = msg.name;
           }
           const label = msg.name || msg.code;
-          enqueue({
-            from: msg.code,
-            fromName: label,
-            text: `connected as ${label}`,
-            ts: Date.now(),
-            kind: "system",
-          });
-          this.pushEvent(`peer ${label} (${msg.code}) connected`);
+          this.pushEvent(`peer ${label} (${msg.code}) connected`, { code: msg.code, name: label });
           this.notifyStateChange();
           break;
         }
@@ -338,14 +341,7 @@ export class Link {
           const oldLabel = labelFor(slot);
           if (slot) slot.name = msg.name;
           const label = msg.name || labelFor(slot);
-          enqueue({
-            from: slot?.code ?? "",
-            fromName: label,
-            text: `renamed to ${label}`,
-            ts: Date.now(),
-            kind: "system",
-          });
-          this.pushEvent(`peer ${oldLabel} renamed to ${label}`);
+          this.pushEvent(`peer ${oldLabel} renamed to ${label}`, { code: slot?.code, name: label });
           this.notifyStateChange();
           break;
         }
@@ -369,7 +365,9 @@ export class Link {
       const slot = this.connections.get(conn.peer);
       const label = slot?.name || slot?.code || conn.peer.slice(0, 8);
       this.connections.delete(conn.peer);
-      if (slot?.code) this.pushEvent(`peer ${label} (${slot.code}) disconnected`);
+      if (slot?.code) {
+        this.pushEvent(`peer ${label} (${slot.code}) disconnected`, { code: slot.code, name: label });
+      }
       this.notifyStateChange();
     });
 
@@ -392,11 +390,14 @@ export class Link {
    * inbox. Used for connection state changes, code rotation, signaling
    * reconnect, OS reboot detection, etc. — things the agent should know
    * about even if no remote peer sent a message.
+   *
+   * Optional peer metadata enriches the inbox entry when the event is
+   * about a specific peer (e.g. connect/rename/disconnect).
    */
-  private pushEvent(text: string): void {
+  private pushEvent(text: string, peer?: { code?: string; name?: string }): void {
     this.inboxQueue.push({
-      from: "",
-      fromName: "link",
+      from: peer?.code ?? "",
+      fromName: peer?.name || peer?.code || "link",
       text,
       ts: Date.now(),
       kind: "system",
@@ -477,14 +478,20 @@ export class Link {
   }
 
   /**
-   * Re-attach the signaling WebSocket if PeerJS dropped it. Idle peers on the
-   * public cloud get cut after a few minutes; established WebRTC data
-   * channels continue working but `peer.connect()` returns undefined for new
-   * codes until signaling is back.
+   * Wait until signaling is open. PeerJS public cloud cuts idle peers after
+   * a few minutes; existing WebRTC data channels keep working but new
+   * connections need a live signaling WS.
+   *
+   * The auto-reconnect handler in bootPeer already calls peer.reconnect()
+   * on the disconnected event, so we deliberately do NOT call reconnect()
+   * here — that would race the auto-handler and throw "Peer is not
+   * disconnected". We just wait for the next open event if we're not
+   * already open.
    */
   private async ensureSignalingOpen(): Promise<void> {
     if (!this.peer || this.peer.destroyed) return;
-    if (!this.peer.disconnected) return;
+    // Already fully open (signaling WS up, peer registered).
+    if (this.peer.open && !this.peer.disconnected) return;
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(
         () => reject(new Error("signaling reconnect timed out — try again or restart opencode")),
@@ -498,11 +505,12 @@ export class Link {
         clearTimeout(t);
         reject(err);
       });
-      try {
-        this.peer.reconnect();
-      } catch (err) {
-        clearTimeout(t);
-        reject(err as Error);
+      // Belt-and-suspenders: if the auto-handler somehow hasn't kicked off
+      // a reconnect yet (e.g. disconnected fired before bootPeer's handler
+      // attached), trigger it. peerjs throws if reconnect is called while
+      // already reconnecting; swallow that — we still want to wait for open.
+      if (this.peer.disconnected) {
+        try { this.peer.reconnect(); } catch {}
       }
     });
   }

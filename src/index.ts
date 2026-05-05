@@ -46,31 +46,26 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
   const link = new Link(identity, salt);
   link.setClient(input.client);
 
-  // Eager peer boot (loading peerjs-on-node + node-datachannel native binding)
-  // is opt-in via OPENCODE_LINK_EAGER=1. Bun on Windows panics during native-
-  // module unload if node-datachannel was loaded — even on a clean ctrl+c
-  // before any link tool was used. Default to lazy: the peer boots when the
-  // agent first calls a link tool. Tradeoff: a receiving agent isn't on the
-  // signaling server until something on its side touches the link, so peers
-  // can't connect to a brand-new opencode session until the agent runs at
-  // least one link_* tool (the system prompt nudges it to call link_whoami).
+  // Capture previous state BEFORE wiring the state-change handler — otherwise
+  // the handler's first write would race the read below and reboot detection
+  // would always read the just-written timestamp (gap ≈ 0, never triggers).
+  const prevState = await readState().catch(() => null);
+
   // Mirror Link state to ~/.config/opencode-link/state.json so the TUI plugin
   // (separate process / module) can render a sidebar panel without IPC.
   link.setStateChangeHandler(() => {
     void writeState(link.toState()).catch(() => {});
   });
+  // Write the initial snapshot now that the handler is wired and prevState
+  // is safely captured.
+  void writeState(link.toState()).catch(() => {});
 
   // Detect OS reboot since last plugin run. If the previous state file's
-  // timestamp is older than the current OS uptime would allow (i.e. the
-  // gap between then-and-now is larger than how long the OS has been up),
-  // the box must have been off in between. Surface that to the agent so
-  // it has context — useful when a long-running session resumes after a
-  // reboot. Best-effort; failures are silent.
-  void (async () => {
-    const prev = await readState();
-    if (!prev) return;
-    const now = Date.now();
-    const offlineFor = now - prev.updatedAt;
+  // timestamp is older than the current OS uptime would allow (i.e. the gap
+  // between then-and-now exceeds how long the OS has been up), the box must
+  // have been off in between. Surface that to the agent for context.
+  if (prevState) {
+    const offlineFor = Date.now() - prevState.updatedAt;
     const uptimeMs = osUptime() * 1000;
     if (offlineFor > uptimeMs + 30_000) {
       const seconds = Math.round(offlineFor / 1000);
@@ -78,11 +73,16 @@ export const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         seconds < 60 ? `${seconds}s`
         : seconds < 3600 ? `${Math.round(seconds / 60)}m`
         : `${Math.round(seconds / 3600)}h`;
-      // Fire after a tick so any session bind happens first.
+      // Fire after a tick so any session bind / model capture happens first.
       setTimeout(() => link.notifyReboot(human), 500);
     }
-  })().catch(() => {});
+  }
 
+  // Eager peer boot (loads peerjs-on-node + node-datachannel) is opt-in via
+  // OPENCODE_LINK_EAGER=1. Bun on Windows panics during native-module unload
+  // when node-datachannel was loaded; defaulting to lazy keeps a bare-launch
+  // ctrl+c clean. Tradeoff: a receiving agent isn't on signaling until its
+  // side calls a link tool — system prompt nudges link_whoami early.
   if (salt.value && process.env.OPENCODE_LINK_EAGER === "1") {
     void link.start().catch((err: Error) => {
       (input.client as any)?.app?.log?.({
