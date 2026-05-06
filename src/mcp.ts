@@ -136,16 +136,29 @@ async function main() {
 
     switch (req.params.name) {
       case "link_whoami": {
+        // Did the client negotiate the experimental.claude/channel capability
+        // at initialize? If not, the user launched Claude Code without the
+        // --dangerously-load-development-channels flag. Tools still work; we
+        // just can't auto-wake the agent on incoming peer messages.
+        const clientCaps = mcp.getClientCapabilities();
+        const channelsEnabled =
+          (clientCaps?.experimental as Record<string, unknown> | undefined)?.["claude/channel"] !== undefined;
+
         const out: Record<string, unknown> = {
           code: link.identity.code,
           name: link.identity.name,
           salt: link.salt.origin,
           ready: link.salt.value !== null,
+          channels_enabled: channelsEnabled,
         };
         if (!link.salt.value) {
           out.warning =
             "NO SHARED SALT IS CONFIGURED. The link code alone is not usable yet — opencode-link needs a shared salt before any peer-to-peer connection can be established. Tell the user how to fix it (set OPENCODE_LINK_SALT env var, or write to the salt file shown). You and your peer must use the same salt.";
           out.saltFilePath = saltFilePath();
+        }
+        if (!channelsEnabled) {
+          out.notice =
+            "CHANNELS ARE NOT ENABLED for this Claude Code session. Outbound link tools (link_connect, link_send) still work, but incoming peer messages will NOT auto-wake you — they queue in link_inbox and you have to drain it manually. If the user wants real-time receive, tell them to relaunch Claude Code with: claude --dangerously-load-development-channels server:opencode-link";
         }
         return text(JSON.stringify(out));
       }
