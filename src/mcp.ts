@@ -2,19 +2,27 @@
 // Claude Code MCP server entry point.
 //
 // Same wire / peer / salt machinery as the opencode plugin (src/index.ts);
-// the differences live here:
+// tools are exposed via the MCP stdio protocol instead of opencode's
+// `tool: { ... }` plugin shape.
 //
-//  - Tools are exposed via the MCP stdio protocol instead of opencode's
-//    `tool: { ... }` plugin shape.
-//  - Push delivery on incoming peer messages emits a Claude Code "channel"
-//    notification (`notifications/claude/channel`) so the agent gets woken
-//    up and the message is injected into the running session as
-//    `<channel source="opencode-link">[link from <name>] <text></channel>`.
+// Note on push delivery: Claude Code 2.1.x has no public mechanism to wake
+// an agent on an out-of-band notification (the docs reference a "channels"
+// feature gated by --dangerously-load-development-channels, but that flag
+// is absent from `claude --help`). Instead we ride Claude Code's existing
+// background-task notification flow: every incoming peer message gets
+// appended as a JSON line to ~/.config/opencode-link/inbox.log, and the
+// agent's recommended pattern is to run a `tail`-based one-liner via Bash
+// run_in_background — when a line arrives, that bash task exits, Claude Code
+// notifies the agent, the agent drains link_inbox and reacts. The exact
+// command is exposed via link_whoami's `delivery` field.
 //
 // Note on the package name: the repo is called `opencode-link` because it
 // started as an opencode-only thing. The same plugin now also targets
 // Claude Code via this MCP entry — the name is a historical artifact.
 
+import { mkdir, appendFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -26,7 +34,11 @@ import { Link, type InboxEntry, type PeerInfo } from "./link.ts";
 
 const SERVER_NAME = "opencode-link";
 const SERVER_VERSION = "0.0.1";
-const CHANNEL_NOTIFICATION = "notifications/claude/channel";
+
+function inboxLogPath(): string {
+  const home = process.env.OPENCODE_LINK_HOME ?? join(homedir(), ".config", "opencode-link");
+  return join(home, "inbox.log");
+}
 
 /** Single text-content reply, the only shape we ever return. */
 function text(s: string): { content: { type: "text"; text: string }[] } {
@@ -81,7 +93,7 @@ const TOOL_DEFS = [
   {
     name: "link_inbox",
     description:
-      "Drain and return all pending messages received since the last call. Returns an empty array if no salt is configured. Useful if you suspect background messages may have queued up while you were busy.",
+      "Drain and return all pending messages received since the last call. Returns immediately (non-blocking). Returns an empty array if no salt is configured. To WAIT for the next message instead of polling, use the background-tail pattern from link_whoami's `delivery.wait_command`.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -105,12 +117,7 @@ async function main() {
   const mcp = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
-      capabilities: {
-        tools: {},
-        // Declares this server as a Claude Code channel emitter.
-        // Without this Claude Code won't accept the channel notifications.
-        experimental: { "claude/channel": {} },
-      },
+      capabilities: { tools: {} },
     },
   );
 
@@ -136,30 +143,35 @@ async function main() {
 
     switch (req.params.name) {
       case "link_whoami": {
-        // Did the client negotiate the experimental.claude/channel capability
-        // at initialize? If not, the user launched Claude Code without the
-        // --dangerously-load-development-channels flag. Tools still work; we
-        // just can't auto-wake the agent on incoming peer messages.
-        const clientCaps = mcp.getClientCapabilities();
-        const channelsEnabled =
-          (clientCaps?.experimental as Record<string, unknown> | undefined)?.["claude/channel"] !== undefined;
-
         const out: Record<string, unknown> = {
           code: link.identity.code,
           name: link.identity.name,
           salt: link.salt.origin,
           ready: link.salt.value !== null,
-          channels_enabled: channelsEnabled,
         };
         if (!link.salt.value) {
           out.warning =
             "NO SHARED SALT IS CONFIGURED. The link code alone is not usable yet — opencode-link needs a shared salt before any peer-to-peer connection can be established. Tell the user how to fix it (set OPENCODE_LINK_SALT env var, or write to the salt file shown). You and your peer must use the same salt.";
           out.saltFilePath = saltFilePath();
         }
-        if (!channelsEnabled) {
-          out.notice =
-            "CHANNELS ARE NOT ENABLED for this Claude Code session. Outbound link tools (link_connect, link_send) still work, but incoming peer messages will NOT auto-wake you — they queue in link_inbox and you have to drain it manually. If the user wants real-time receive, tell them to relaunch Claude Code with: claude --dangerously-load-development-channels server:opencode-link";
-        }
+        // Wake-up pattern: Claude Code has no out-of-band push for MCP
+        // servers, but its Bash tool's run_in_background flow notifies the
+        // agent when a background process exits. We append each new inbox
+        // event as a JSON line to inbox.log, so a `tail` watching that file
+        // exits as soon as something arrives → agent gets re-engaged.
+        const log = inboxLogPath();
+        out.delivery = {
+          inbox_log: log,
+          poll: "Call link_inbox at any time for a non-blocking drain of pending entries.",
+          wait_via_bash: [
+            "When you've sent a peer a message and want to wait for their reply WITHOUT keeping your turn open:",
+            "1. Run this command via the Bash tool with run_in_background=true:",
+            `     tail -n 0 -F "${log}" 2>/dev/null | head -n 1`,
+            "2. End your turn. Claude Code will re-engage you automatically when the bash task exits — i.e. the moment a new peer event lands.",
+            "3. On wake-up, call link_inbox to drain the queue and read what arrived.",
+            "If the peer is slow / silent, the bash task just stays running until they reply or the user interrupts.",
+          ].join("\n"),
+        };
         return text(JSON.stringify(out));
       }
       case "link_set_name": {
@@ -214,27 +226,34 @@ async function main() {
     }
   });
 
-  // Wire push delivery: every received peer message becomes a channel
-  // notification. Claude Code injects the content into the running session
-  // as a <channel source="opencode-link">…</channel> element, waking the
-  // agent the same way a typed user message would.
+  // Append every incoming peer event to inbox.log so an external watcher
+  // (e.g. `tail -n 0 -F` running as a background Bash task in Claude Code)
+  // can use it as a wake-up signal. The link.inboxQueue still holds the
+  // canonical entries — link_inbox drains those — but the file is the
+  // signaling channel. Write best-effort; failures don't block delivery.
+  const logPath = inboxLogPath();
+  let logReady: Promise<void> | null = null;
+  const ensureLogDir = async () => {
+    if (logReady) return logReady;
+    logReady = mkdir(dirname(logPath), { recursive: true }).then(() => undefined);
+    return logReady;
+  };
   link.setOutbound(async (push) => {
-    const content =
-      push.kind === "event"
-        ? `[link event] ${push.text}`
-        : `[link from ${push.fromName}] ${push.text}`;
-    await mcp.notification({
-      method: CHANNEL_NOTIFICATION,
-      params: {
-        content,
-        meta: {
-          source: "opencode-link",
-          kind: push.kind,
-          ...(push.fromCode ? { from_code: push.fromCode } : {}),
-          ...(push.fromName ? { from_name: push.fromName } : {}),
-        },
-      },
-    });
+    try {
+      await ensureLogDir();
+      const line = JSON.stringify({
+        ts: Date.now(),
+        kind: push.kind,
+        from_code: push.fromCode || undefined,
+        from_name: push.fromName || undefined,
+        text: push.text,
+      });
+      await appendFile(logPath, line + "\n", "utf8");
+    } catch (err) {
+      // Best-effort. The in-memory queue still has the entry, so the agent
+      // can still read it via link_inbox. Just log to stderr.
+      console.error(`[opencode-link] inbox.log append failed: ${(err as Error).message}`);
+    }
   });
 
   await mcp.connect(new StdioServerTransport());

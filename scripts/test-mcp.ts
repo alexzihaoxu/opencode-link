@@ -118,38 +118,24 @@ async function main() {
   console.log("set_name:", named.content[0].text);
 
   // 7. End-to-end: connect a peer to the MCP server's link, send a message,
-  //    confirm the MCP server emits a `notifications/claude/channel` event.
-  console.log("---channel-notification test---");
+  //    confirm the MCP server appends to inbox.log (the wake-up signal for
+  //    the agent's tail-based bash watcher) AND that link_inbox returns the
+  //    message.
+  console.log("---inbox-log + receive test---");
   const whoamiData = JSON.parse(whoami.content[0].text);
   const mcpCode: string = whoamiData.code;
+  const inboxLog: string = whoamiData.delivery?.inbox_log;
+  if (!inboxLog) {
+    console.error("FAIL: link_whoami response is missing delivery.inbox_log");
+    process.exit(1);
+  }
+  console.log("inbox_log path:", inboxLog);
 
-  const channelMessages: any[] = [];
-  // Hook into stdout to capture channel notifications. Since the proc.stdout
-  // listener at the top of this file already routes notifications via the
-  // `[server-notification]` log path, we add a sniffer here. Easiest: tap the
-  // existing flow by wrapping the listener — instead, reuse a tiny intercept.
-  proc.stdout!.removeAllListeners("data");
-  let buf = "";
-  proc.stdout!.on("data", (chunk) => {
-    buf += chunk.toString();
-    let i: number;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i).trim();
-      buf = buf.slice(i + 1);
-      if (!line) continue;
-      let msg: any;
-      try { msg = JSON.parse(line); } catch { continue; }
-      if (msg.method === "notifications/claude/channel") {
-        channelMessages.push(msg);
-      }
-      if ("id" in msg && pending.has(msg.id)) {
-        const p = pending.get(msg.id)!;
-        pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-        else p.resolve(msg.result);
-      }
-    }
-  });
+  // Snapshot log size BEFORE the peer sends, so we can detect growth.
+  const fs = await import("node:fs/promises");
+  let beforeSize = 0;
+  try { beforeSize = (await fs.stat(inboxLog)).size; } catch {}
+  console.log("inbox.log size before:", beforeSize);
 
   const { Link } = await import("../src/link.ts");
   const peerCode = `RX${Math.random().toString(36).slice(2, 6).toUpperCase()}`.slice(0, 6);
@@ -160,25 +146,41 @@ async function main() {
   await peer.start();
   console.log(`peer started with code ${peerCode}, dialing MCP server (${mcpCode})`);
   await peer.connect(mcpCode);
-  await new Promise((r) => setTimeout(r, 300)); // hello roundtrip
+  await new Promise((r) => setTimeout(r, 300));
   await peer.send(mcpCode, "hello from external peer");
-  console.log("waiting for channel notification...");
+  console.log("waiting for inbox.log to grow + link_inbox to see message...");
   await new Promise((r) => setTimeout(r, 1500));
 
-  const msgChannels = channelMessages.filter(
-    (m) => m.params?.meta?.kind === "msg",
-  );
-  if (msgChannels.length === 0) {
-    console.error("FAIL: no channel notification emitted for the peer message");
-    console.error("all channel messages:", channelMessages);
+  // Verify inbox.log has new content
+  let afterSize = 0;
+  let logTail = "";
+  try {
+    afterSize = (await fs.stat(inboxLog)).size;
+    const buf = await fs.readFile(inboxLog, "utf8");
+    logTail = buf.split("\n").filter(Boolean).slice(-3).join("\n");
+  } catch (e) {
+    console.error("FAIL: cannot read inbox.log:", (e as Error).message);
     proc.kill("SIGKILL");
     process.exit(1);
   }
-  console.log(`got ${channelMessages.length} channel notification(s):`);
-  for (const m of channelMessages) {
-    console.log("  content:", JSON.stringify(m.params.content));
-    console.log("  meta:   ", JSON.stringify(m.params.meta));
+  if (afterSize <= beforeSize) {
+    console.error(`FAIL: inbox.log did not grow (before=${beforeSize}, after=${afterSize})`);
+    proc.kill("SIGKILL");
+    process.exit(1);
   }
+  console.log(`inbox.log grew ${beforeSize} → ${afterSize} bytes; last entries:\n${logTail}`);
+
+  // Verify link_inbox tool also sees the message
+  const inboxAfter = await rpc("tools/call", { name: "link_inbox", arguments: {} });
+  const entries = JSON.parse(inboxAfter.content[0].text);
+  const msgEntry = entries.find((e: any) => e.kind === "msg" && e.text === "hello from external peer");
+  if (!msgEntry) {
+    console.error("FAIL: link_inbox did not return the peer message");
+    console.error("entries:", entries);
+    proc.kill("SIGKILL");
+    process.exit(1);
+  }
+  console.log("link_inbox returned the msg entry:", JSON.stringify(msgEntry));
 
   console.log("---all checks passed, shutting down---");
   proc.kill("SIGTERM");
