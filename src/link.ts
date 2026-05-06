@@ -577,7 +577,15 @@ export class Link {
     }
     this.attach(conn);
     await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`connect to ${code} timed out — is the other side running?`)), 15000);
+      const t = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `connect to ${code} timed out after 15s. The other side isn't reachable on the signaling server. Common causes: (1) their peer hasn't booted — opencode boots lazily by default, so ask them to call any link_* tool first (or set OPENCODE_LINK_EAGER=1); (2) salt mismatch — both sides must use the same OPENCODE_LINK_SALT; (3) typo in the code (the alphabet allows visually-confusable pairs like 1/I and 0/O — verify character-by-character); (4) signaling server unreachable.`,
+            ),
+          ),
+        15000,
+      );
       conn.on("open", () => {
         clearTimeout(t);
         resolve();

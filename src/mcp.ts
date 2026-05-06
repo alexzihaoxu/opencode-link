@@ -20,7 +20,7 @@
 // started as an opencode-only thing. The same plugin now also targets
 // Claude Code via this MCP entry — the name is a historical artifact.
 
-import { mkdir, appendFile } from "node:fs/promises";
+import { mkdir, appendFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -38,6 +38,23 @@ const SERVER_VERSION = "0.0.1";
 function inboxLogPath(): string {
   const home = process.env.OPENCODE_LINK_HOME ?? join(homedir(), ".config", "opencode-link");
   return join(home, "inbox.log");
+}
+
+/**
+ * Snapshot the inbox.log byte size at the moment of call. The wake-up bash
+ * one-liner uses this as a START offset (`tail -c +N`), which closes the
+ * race where a peer reply lands between a tool returning and the agent
+ * spawning the tail watcher — `tail -n 0 -F` would miss those, byte-anchored
+ * tail catches them.
+ */
+async function inboxLogSize(): Promise<number> {
+  try { return (await stat(inboxLogPath())).size; } catch { return 0; }
+}
+
+/** Build the bash one-liner that exits when the next inbox.log entry arrives. */
+function waitCommand(fromBytes: number): string {
+  // +1 because tail -c +N is 1-indexed and means "starting at byte N".
+  return `tail -c +${fromBytes + 1} -F "${inboxLogPath()}" 2>/dev/null | head -n 1`;
 }
 
 /** Single text-content reply, the only shape we ever return. */
@@ -80,7 +97,7 @@ const TOOL_DEFS = [
   {
     name: "link_send",
     description:
-      "Send a text message to a connected peer (identified by their link code). Requires a shared salt and an active connection (call link_connect first).\n\nReply rules: only call this when you have a real answer / question / status / new info. Do NOT reply to acknowledgments, 'understood', 'thanks', 'ok' — those end the exchange and replying creates an ack-loop. Silence is a valid response.",
+      "Send a text message to a connected peer (identified by their link code). Requires a shared salt and an active connection (call link_connect first).\n\nReply rules: only call this when you have a real answer / question / status / new info. Do NOT reply to acknowledgments, 'understood', 'thanks', 'ok' — those end the exchange and replying creates an ack-loop. Silence is a valid response.\n\nThe response is JSON: { ok, wait_for_reply: { command, note } }. If you're expecting a reply, run `wait_for_reply.command` via the Bash tool with run_in_background=true and end your turn — Claude Code re-engages you when the next inbox event lands. The command is byte-anchored at the moment of send, so it catches replies that arrive even before the tail process starts.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -93,7 +110,7 @@ const TOOL_DEFS = [
   {
     name: "link_inbox",
     description:
-      "Drain and return all pending messages received since the last call. Returns immediately (non-blocking). Returns an empty array if no salt is configured. To WAIT for the next message instead of polling, use the background-tail pattern from link_whoami's `delivery.wait_command`.",
+      "Drain and return all pending messages received since the last call. Returns immediately (non-blocking). Response is JSON: { entries: InboxEntry[], wait_for_next: { command, note } }. After processing the entries, you can run wait_for_next.command via Bash run_in_background to wait for the next event. Returns { entries: [], … } if no salt is configured.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
@@ -159,18 +176,15 @@ async function main() {
         // agent when a background process exits. We append each new inbox
         // event as a JSON line to inbox.log, so a `tail` watching that file
         // exits as soon as something arrives → agent gets re-engaged.
+        // Anchor at current byte size so any event landing between this
+        // tool returning and the tail spawning is still captured.
         const log = inboxLogPath();
+        const size = await inboxLogSize();
         out.delivery = {
           inbox_log: log,
           poll: "Call link_inbox at any time for a non-blocking drain of pending entries.",
-          wait_via_bash: [
-            "When you've sent a peer a message and want to wait for their reply WITHOUT keeping your turn open:",
-            "1. Run this command via the Bash tool with run_in_background=true:",
-            `     tail -n 0 -F "${log}" 2>/dev/null | head -n 1`,
-            "2. End your turn. Claude Code will re-engage you automatically when the bash task exits — i.e. the moment a new peer event lands.",
-            "3. On wake-up, call link_inbox to drain the queue and read what arrived.",
-            "If the peer is slow / silent, the bash task just stays running until they reply or the user interrupts.",
-          ].join("\n"),
+          wait_command: waitCommand(size),
+          wait_note: "Run wait_command via the Bash tool with run_in_background=true, then end your turn. Claude Code will re-engage you when the next inbox event lands. On wake, call link_inbox to drain. NOTE: link_send and link_inbox responses each include their own freshly-anchored wait command — prefer those over this one when you're already in the flow.",
         };
         return text(JSON.stringify(out));
       }
@@ -198,14 +212,31 @@ async function main() {
         const body = String(args.text ?? "");
         try {
           await link.send(code, body);
-          return text(`sent ${body.length} chars to ${code.toUpperCase()}`);
+          // Snapshot inbox.log size AFTER sending. Any reply (or other
+          // event) appended from this point on will be captured by the
+          // byte-anchored tail in wait_for_reply.command.
+          const size = await inboxLogSize();
+          return text(JSON.stringify({
+            ok: `sent ${body.length} chars to ${code.toUpperCase()}`,
+            wait_for_reply: {
+              command: waitCommand(size),
+              note: "If you're expecting a reply, run this command via the Bash tool with run_in_background=true, then end your turn. Claude Code will re-engage you the moment the next inbox event lands. After wake, call link_inbox to drain. If you don't expect a reply, just stop calling tools — silence is fine.",
+            },
+          }));
         } catch (e) {
           return text(`ERROR: ${(e as Error).message}`);
         }
       }
       case "link_inbox": {
         const entries: InboxEntry[] = link.inbox();
-        return text(JSON.stringify(entries));
+        const size = await inboxLogSize();
+        return text(JSON.stringify({
+          entries,
+          wait_for_next: {
+            command: waitCommand(size),
+            note: "Run via Bash run_in_background to be re-engaged on the next inbox event after this drain. Anchored to the current log size, so concurrent arrivals during the spawn window are still captured.",
+          },
+        }));
       }
       case "link_peers": {
         const peers: PeerInfo[] = link.peers();

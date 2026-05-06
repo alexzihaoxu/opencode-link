@@ -172,7 +172,14 @@ async function main() {
 
   // Verify link_inbox tool also sees the message
   const inboxAfter = await rpc("tools/call", { name: "link_inbox", arguments: {} });
-  const entries = JSON.parse(inboxAfter.content[0].text);
+  const inboxResp = JSON.parse(inboxAfter.content[0].text);
+  if (!inboxResp.wait_for_next?.command || !inboxResp.wait_for_next.command.includes("tail -c")) {
+    console.error("FAIL: link_inbox response missing wait_for_next.command (byte-anchored tail)");
+    console.error("response:", inboxResp);
+    proc.kill("SIGKILL");
+    process.exit(1);
+  }
+  const entries = inboxResp.entries;
   const msgEntry = entries.find((e: any) => e.kind === "msg" && e.text === "hello from external peer");
   if (!msgEntry) {
     console.error("FAIL: link_inbox did not return the peer message");
