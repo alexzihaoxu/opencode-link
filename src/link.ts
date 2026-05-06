@@ -247,12 +247,19 @@ export class Link {
 
   private async bootPeer(): Promise<void> {
     if (!this.salt.value) throw this.noSaltError();
-    // The vendored peerjs-on-node bundle has been patched to declare its
-    // WebSocket / RTC* aliases as module-local vars instead of implicit
-    // globals (see lib/peerjs-on-node/dist/peerjs-on-node.js header). This
-    // means require()ing it no longer pollutes globalThis — opencode's
-    // stream parser (which uses Bun's native WebSocket) keeps working.
-    const mod = require("peerjs-on-node");
+    // The vendored peerjs-on-node bundle lives at <package>/lib/peerjs-on-node/.
+    // We require it via a RELATIVE path rather than as a `file:` package dep
+    // because bun does not resolve `file:` deps transitively when our package
+    // is itself installed via `bun add github:…`. peerjs-on-node's own deps
+    // (node-datachannel, ws, filereader, web-file-polyfill) are hoisted to
+    // our top-level package.json so they land in the consumer's node_modules
+    // and Node's resolution from inside lib/peerjs-on-node/dist/ finds them.
+    //
+    // The bundle is patched to declare its WebSocket / RTC* aliases as
+    // module-local vars instead of implicit globals (see
+    // lib/peerjs-on-node/dist/peerjs-on-node.js header), so loading it
+    // doesn't clobber Bun's native WebSocket and break opencode/Claude HTTP.
+    const mod = require("../lib/peerjs-on-node");
     const Peer = mod.Peer ?? mod.default?.Peer ?? mod;
     const myPeerId = peerIdForCode(this.identity.code, this.salt.value);
     const myPeer = new Peer(myPeerId, this.options);
