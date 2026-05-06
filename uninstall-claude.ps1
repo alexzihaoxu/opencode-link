@@ -20,7 +20,7 @@ else {
     Write-Host "→ claude CLI not on PATH — skipping MCP unregister"
 }
 
-# 2. Install dir.
+# 2. Install dir (Claude-specific).
 if (Test-Path $installDir) {
     Write-Host "→ removing $installDir"
     Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
@@ -30,28 +30,13 @@ else {
     Write-Host "  (already gone)"
 }
 
-# 3. Stale state mirror.
-$stateFile = Join-Path $linkHome "state.json"
-if (Test-Path $stateFile) {
-    Remove-Item -Force $stateFile -ErrorAction SilentlyContinue
-}
-
-# 4. Optionally remove identity + salt files.
-if (Test-Path $linkHome) {
-    $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI
-    if ($isInteractive) {
-        $yn = Read-Host "Also delete persisted identities + salt at $linkHome? [y/N]"
-        if ($yn -match '^(y|yes)$') {
-            Remove-Item -Recurse -Force $linkHome
-            Write-Host "✓ identities + salt removed"
-        }
-        else {
-            Write-Host "→ kept $linkHome (delete it manually if you want a clean slate)"
-        }
-    }
-    else {
-        Write-Host "→ identities + salt at $linkHome left in place (re-run interactively or rm -r to clear)"
-    }
-}
+# Note: persisted identities + salt + state.json under $linkHome are SHARED
+# with the opencode install (if any). Don't touch them here — the user can
+# rm -rf $linkHome manually if they're sure neither harness uses it.
 
 Write-Host "✓ opencode-link uninstalled from Claude Code. Restart any open ``claude`` sessions."
+Write-Host ""
+Write-Host "Note: persisted identities + salt at $linkHome were left in place."
+Write-Host "They're shared with the opencode install. Delete manually with"
+Write-Host "  Remove-Item -Recurse -Force `"$linkHome`""
+Write-Host "if you don't use opencode-link with opencode either."

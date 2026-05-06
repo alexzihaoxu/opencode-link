@@ -29,7 +29,7 @@ else
   say "claude CLI not on PATH — skipping MCP unregister"
 fi
 
-# 2. Install dir.
+# 2. Install dir (Claude-specific: ~/.config/opencode-link/install/).
 if [ -d "$INSTALL_DIR" ]; then
   say "removing $INSTALL_DIR"
   rm -rf "$INSTALL_DIR"
@@ -37,28 +37,18 @@ else
   say "install dir"; skip
 fi
 
-# 3. Stale state file (TUI mirror; harmless to leave).
-STATE="$LINK_HOME/state.json"
-if [ -f "$STATE" ]; then
-  rm -f "$STATE"
-fi
-
-# 4. Optionally remove identity + salt files. Only ask interactively.
-if [ -d "$LINK_HOME" ]; then
-  if [ -t 0 ] && [ -t 1 ]; then
-    read -r -p "Also delete persisted identities + salt at $LINK_HOME? [y/N] " yn
-    case "$yn" in
-      y|Y|yes)
-        rm -rf "$LINK_HOME"
-        ok "identities + salt removed"
-        ;;
-      *)
-        say "kept $LINK_HOME (delete it manually if you want a clean slate)"
-        ;;
-    esac
-  else
-    say "identities + salt at $LINK_HOME left in place (re-run interactively or rm -rf to clear)"
-  fi
-fi
+# Note on $LINK_HOME (~/.config/opencode-link/): we deliberately do NOT touch
+# anything else under it. The identity files (identity-*.json), the salt file,
+# and state.json are SHARED with the opencode install (if you have one), so
+# removing them here could trash a working opencode setup. If you really want
+# a clean slate, run:
+#   rm -rf "$LINK_HOME"
+# manually after confirming you don't have opencode-link installed for
+# opencode too.
 
 ok "opencode-link uninstalled from Claude Code. Restart any open \`claude\` sessions."
+echo
+echo "Note: persisted identities + salt at $LINK_HOME were left in place."
+echo "They're shared with the opencode install. Delete manually with"
+echo "  rm -rf \"$LINK_HOME\""
+echo "if you don't use opencode-link with opencode either."

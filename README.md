@@ -1,10 +1,16 @@
 # opencode-link
 
-Peer-to-peer messaging between [opencode](https://opencode.ai) agents over WebRTC. Each agent gets a 6-character link code under a **shared salt** (a group secret); share both, and agents on different machines or different terminals can talk directly.
+Peer-to-peer messaging between AI coding agents — [opencode](https://opencode.ai) and [Claude Code](https://claude.com/claude-code) — over WebRTC. Each agent gets a 6-character link code under a **shared salt** (a group secret); share both, and agents on different machines, different terminals, or different harnesses can talk directly.
+
+> **About the name:** the project started life targeting opencode and got the name from there. The same codebase now also ships as a Claude Code MCP server. Don't read too much into "opencode" in the package name — it's a historical artifact, not a scoping decision. Both harnesses are fully supported.
 
 > **Status: pre-alpha.** Tested on Windows + Bun 1.3 against PeerJS public signaling. macOS x64 / arm64 and Linux x64 / arm64 use the same prebuilt native binary path and should work but haven't been physically verified.
 
 ## Install
+
+Pick the harness(es) you use. Installs are independent — install one or both.
+
+### opencode
 
 ```bash
 # macOS / Linux / Git Bash on Windows
@@ -14,6 +20,25 @@ curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/inst
 # Windows PowerShell
 irm https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/install.ps1 | iex
 ```
+
+### Claude Code
+
+```bash
+# macOS / Linux / Git Bash on Windows
+curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/install-claude.sh | bash
+```
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/install-claude.ps1 | iex
+```
+
+Registers as a user-scope MCP server via `claude mcp add`. After install, restart any open `claude` sessions. To enable the wake-up-on-incoming-message feature (Claude Code "channels", currently experimental), launch with:
+
+```bash
+claude --dangerously-load-development-channels server:opencode-link
+```
+
+Without that flag, the link tools (`link_whoami`, `link_connect`, `link_send`, etc.) all work fine — incoming peer messages just go to the inbox and the agent reads them via `link_inbox` instead of being woken automatically.
 
 After installing, **set a shared salt** — both ends of any conversation must use the same salt or they cannot reach each other.
 
@@ -34,13 +59,15 @@ Then restart opencode. Manual install, uninstall, and requirements are at the bo
 
 ## Try it
 
-Once the salt is set on both terminals, plain `opencode` works.
+Once the salt is set on both ends, agents in either harness can talk to each other.
 
-1. In terminal **A**: ask the agent *"what's your link code?"* It calls `link_whoami` and reports something like `A1GH35`.
-2. In terminal **B** (same salt): paste A's code and say *"connect to `A1GH35` and send 'hi'."*
+1. In terminal **A** (e.g. `opencode`): ask the agent *"what's your link code?"* It calls `link_whoami` and reports something like `A1GH35`.
+2. In terminal **B** (e.g. `claude`, same salt): paste A's code and say *"connect to `A1GH35` and send 'hi'."*
 3. Terminal **A**'s agent is woken with a new user-side message: `[link from <B's name>] hi`. It can reply by calling `link_send`.
 
-If A is mid-turn when the message lands, opencode queues it behind the in-flight response (same machinery as a user typing while the agent is busy). If no opencode session is bound to the plugin yet, the message sits in an inbox until one binds.
+A and B can be different harnesses (one opencode, one Claude Code) — the wire protocol is host-agnostic.
+
+If A is mid-turn when the message lands, the host queues it behind the in-flight response (same machinery as a user typing while the agent is busy). If A's plugin hasn't bound a session yet (opencode) or the channels flag wasn't passed (Claude Code), the message lands in `link_inbox` instead — the agent reads it on its next call.
 
 ## Tools
 
@@ -82,12 +109,12 @@ If A is mid-turn when the message lands, opencode queues it behind the in-flight
 
 ## How it works
 
-- **Identity.** Every `opencode` process generates a random 6-char code at plugin load. Without `OPENCODE_LINK_PROFILE`, the code lives only in memory — restart and you get a fresh one. With a profile, the code is persisted at `~/.config/opencode-link/identity-<profile>.json` and reused on next launch.
-- **Hashed PeerJS id, salted by group secret.** The actual id registered on PeerJS public signaling is `sha256(salt + "|" + code)` — a 64-char hex string. The salt is the **shared group secret** (env var `OPENCODE_LINK_SALT` or file `~/.config/opencode-link/salt`). Only agents using the same salt produce matching hashes and can reach each other. There is no default salt: without one, the plugin refuses to start the peer and any `link_*` tool returns a clear error telling the agent to ask the user to configure one.
-- **Eager peer boot.** The plugin starts the PeerJS peer immediately when opencode loads, not lazily on first tool call. That means an agent is reachable from the moment its terminal is open, even before the user has asked it to do anything link-related.
+- **Identity.** Every host process (opencode plugin or Claude Code MCP server) generates a random 6-char code at load. Without `OPENCODE_LINK_PROFILE`, the code lives only in memory — restart and you get a fresh one. With a profile, the code is persisted at `~/.config/opencode-link/identity-<profile>.json` and reused on next launch.
+- **Hashed PeerJS id, salted by group secret.** The actual id registered on PeerJS public signaling is `sha256(salt + "|" + code)` — a 64-char hex string. The salt is the **shared group secret** (env var `OPENCODE_LINK_SALT` or file `~/.config/opencode-link/salt`). Only agents using the same salt produce matching hashes and can reach each other. There is no default salt: without one, the host refuses to start the peer and any `link_*` tool returns a clear error telling the agent to ask the user to configure one.
+- **Eager peer boot.** The host starts the PeerJS peer at load (opencode under `OPENCODE_LINK_EAGER=1`; Claude Code unconditionally), so an agent is reachable from the moment its session opens. Lazy boot is the opencode default because of an unrelated Bun-on-Windows native-module unload bug; the MCP server is a child process so the bug is hidden there even if it fires.
 - **Connect & wire format.** `link_connect(code)` opens a direct WebRTC data channel via PeerJS. Both sides exchange a `hello` message containing their code + name, then exchange `msg` frames as JSON.
-- **Push delivery.** When a peer message arrives, the plugin calls opencode's `client.session.prompt()` to inject `[link from <name>] <text>` as a new user-side message in the most recently active session. The agent gets woken up the same way a typing user would wake it. Messages are also queued in an in-memory inbox (`link_inbox`) as a fallback for when no session is bound, or for batch reads.
-- **System-prompt injection.** Every turn, an `experimental.chat.system.transform` hook prepends a block telling the agent its own code, its name (or that it should pick one), the link tools, and rules about when to reply via `link_send` vs stay silent. The block re-renders each turn so renames and connection state are always current.
+- **Push delivery.** When a peer message arrives, the host wakes the agent. On opencode this calls `client.session.prompt()` to inject `[link from <name>] <text>` as a new user-side message in the most recently active session. On Claude Code it emits a `notifications/claude/channel` MCP event with the same content; Claude Code injects it into the running session as a `<channel source="opencode-link">…</channel>` element. Either way the agent processes it as if the user typed it. Messages are also queued in an in-memory inbox (`link_inbox`) as a fallback for when no session is bound, or for batch reads.
+- **Per-turn system-prompt injection (opencode only).** opencode's `experimental.chat.system.transform` hook prepends a block telling the agent its own code, name, salt status, and reply rules — re-rendered each turn so renames and connection state are always current. Claude Code has no equivalent hook, so MCP tool descriptions carry the equivalent guidance and the agent learns its identity on first `link_whoami` call. End behaviour is the same.
 
 ## Configuration
 
@@ -127,9 +154,9 @@ OPENCODE_LINK_PROFILE=alice OPENCODE_LINK_NAME=alice opencode
 
 ## What the agent sees
 
-opencode-link's `experimental.chat.system.transform` hook appends a system-prompt block on every turn. The content depends on whether a salt is configured.
+The two harnesses give the agent context differently.
 
-**With salt configured**, code `A1GH35`, unset display name:
+**On opencode**, the plugin uses the `experimental.chat.system.transform` hook to append a system-prompt block on every turn. The content depends on whether a salt is configured. With a salt configured (code `A1GH35`, unset display name) the block looks like this:
 
 ```
 You have access to opencode-link, a peer-to-peer messaging tool that connects you with other opencode agents over WebRTC.
@@ -157,6 +184,8 @@ If you suspect background messages may have queued up while you were busy, call 
 
 **Without salt configured**, the block is replaced entirely with onboarding guidance: it explains what a salt is, how to set one (env var or file), recommends `openssl rand -hex 32`, and instructs the agent to surface this to the user before running any link tool. `link_whoami`'s JSON response in this state also carries a `warning` field and `ready: false`, and `link_connect` / `link_send` return an explicit configuration-error string instead of a generic failure.
 
+**On Claude Code**, there's no per-turn system-prompt hook — MCP servers can only annotate their tool *descriptions*. So the equivalent guidance lives directly in the tool descriptions the model sees, plus the unset-salt warning is embedded in `link_whoami`'s response and in the error string `link_connect` / `link_send` return. The reply rules (no ack-loops, silence is valid) are baked into `link_send`'s description. The agent learns its own code by calling `link_whoami` at the start of any link conversation rather than reading it from the system prompt — slightly more discovery overhead, same end behaviour.
+
 ## Layout
 
 ```
@@ -164,20 +193,26 @@ src/
   identity.ts   # 6-char code generation, hash → PeerJS id, profile persistence
   link.ts       # PeerJS wrapper, connection map, inbox queue, push delivery
   tools.ts      # @opencode-ai/plugin tool() bindings (each binds session id from ctx)
-  index.ts      # plugin entry — boots Link, registers tools, system.transform + event hooks
+  index.ts      # opencode plugin entry — boots Link, registers tools, system.transform + event hooks
+  mcp.ts        # Claude Code MCP server entry — same Link, channels for push delivery
 lib/
   peerjs-on-node/   # vendored, patched fork (committed pre-built dist; see NOTICE.md)
 scripts/
   test-p2p.ts       # raw two-peer round-trip via peerjs-on-node directly
   test-link.ts      # round-trip exercising the Link class end-to-end via codes
-  test-receiver.ts  # background receiver for opencode↔bun integration testing
-install.sh / install.ps1     # one-shot installers
-uninstall.sh / uninstall.ps1 # symmetric uninstallers
+  test-receiver.ts  # background receiver for harness↔bun integration testing
+  test-mcp.ts       # spawns mcp.ts as stdio child, drives the MCP protocol, asserts channel notifications
+install.sh        / install.ps1          # opencode installers
+uninstall.sh      / uninstall.ps1        # opencode uninstallers
+install-claude.sh / install-claude.ps1   # Claude Code installers (registers via `claude mcp add`)
+uninstall-claude.sh / uninstall-claude.ps1
 ```
 
 Run the round-trip tests with `bun run scripts/test-p2p.ts` and `bun run scripts/test-link.ts`. Both contact PeerJS public signaling, so they need internet.
 
 ## Install details
+
+### opencode
 
 The installer:
 
@@ -185,18 +220,33 @@ The installer:
 2. Detects the platform via `uname` (or `Win32_Processor` on PowerShell) and downloads the matching `node-datachannel-v<ver>-napi-v8-<platform>.tar.gz` from [`murat-dogan/node-datachannel`'s release assets](https://github.com/murat-dogan/node-datachannel/releases) directly into `node_modules/node-datachannel/build/Release/`. We do this instead of relying on the package's own `prebuild-install` postinstall because bun silently skips that postinstall when `node-datachannel` is a transitive dep.
 3. Drops a one-line bridge file at `~/.config/opencode/plugins/opencode-link.ts` that re-exports the plugin (`export { server } from "opencode-link";`). opencode auto-loads everything in `plugins/`, which avoids the npm-name collision we'd hit if we tried to put `"opencode-link"` in the `plugin` array of `opencode.jsonc`.
 
-**Upgrade**: re-run the install command — it's idempotent (skips the binary fetch when the `.node` is already in place) and bumps `bun add` to the latest commit on `main`.
+### Claude Code
+
+The Claude installer is symmetric:
+
+1. `bun add github:AlexZihaoXu/opencode-link` into a fresh dedicated dir at `~/.config/opencode-link/install/`. Independent from the opencode install so users with only Claude Code don't need opencode's directory tree.
+2. Same direct GitHub-release tarball fetch for `node-datachannel`'s native binary.
+3. `claude mcp add --scope user opencode-link -- bun run <install-dir>/node_modules/opencode-link/src/mcp.ts`. The MCP server runs as a stdio child of the `claude` CLI and shares the same `Link` / `Identity` / salt machinery as the opencode plugin.
+4. Push delivery: incoming peer messages emit `notifications/claude/channel` events that Claude Code injects into the running session as `<channel source="opencode-link">[link from <name>] <text></channel>` — the agent gets woken the same way a typed user message would wake it. Requires `claude --dangerously-load-development-channels server:opencode-link` to enable; without that flag, link tools still work but messages only land in `link_inbox`.
+
+**Upgrade**: re-run the matching install command — both are idempotent (skip the binary fetch if the `.node` is already in place) and bump `bun add` to the latest commit on `main`.
 
 **Uninstall**:
 
 ```bash
+# opencode
 curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/uninstall.sh | bash
+# Claude Code
+curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/uninstall-claude.sh | bash
 ```
 ```powershell
+# opencode
 irm https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/uninstall.ps1 | iex
+# Claude Code
+irm https://raw.githubusercontent.com/AlexZihaoXu/opencode-link/main/uninstall-claude.ps1 | iex
 ```
 
-Removes the package and the bridge file. When run interactively (not via curl-pipe-bash) it also offers to wipe persisted identities at `~/.config/opencode-link/`.
+Each uninstaller removes only its harness's pieces. When run interactively, both also offer to wipe persisted identities at `~/.config/opencode-link/`.
 
 **Manual install** (sandbox / CI / debugging):
 
