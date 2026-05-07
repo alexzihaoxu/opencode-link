@@ -252,7 +252,15 @@ export class Link {
     // globals (see lib/peerjs-on-node/dist/peerjs-on-node.js header). This
     // means require()ing it no longer pollutes globalThis — opencode's
     // stream parser (which uses Bun's native WebSocket) keeps working.
-    const mod = require("peerjs-on-node");
+    //
+    // We resolve the bundle by relative path rather than via package name.
+    // When this package is installed via `bun add github:…`, bun does not
+    // resolve our `file:./lib/peerjs-on-node` entry transitively, so a bare
+    // require("peerjs-on-node") fails in the consumer's tree. The bundle's
+    // own runtime requires (node-datachannel, ws, filereader,
+    // web-file-polyfill) are hoisted into our top-level dependencies so
+    // Node's resolution from inside lib/peerjs-on-node/dist/ finds them.
+    const mod = require("../lib/peerjs-on-node");
     const Peer = mod.Peer ?? mod.default?.Peer ?? mod;
     const myPeerId = peerIdForCode(this.identity.code, this.salt.value);
     const myPeer = new Peer(myPeerId, this.options);
