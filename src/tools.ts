@@ -5,6 +5,23 @@ export function buildTools(link: Link) {
   const bind = (ctx: { sessionID?: string } | undefined) => link.bindSession(ctx?.sessionID);
 
   /**
+   * Fire-and-forget peer registration. Lazy-by-default boot meant the
+   * receiving side stayed off signaling until *they* called link_connect,
+   * so the very first cross-agent connect always timed out (the receiver
+   * wasn't reachable). Now any link_* tool the agent touches kicks off
+   * registration in the background — by the time the user shares the
+   * code with the other agent, this side is on signaling.
+   *
+   * Errors are swallowed: this side might not have a salt yet, or the
+   * peerjs cloud might be slow. Either way, an explicit link_connect
+   * later still surfaces the real error.
+   */
+  const ensureRegistered = (): void => {
+    if (!link.salt.value) return;
+    void link.start().catch(() => {});
+  };
+
+  /**
    * Run an action that requires the peer to be online (i.e. salt configured).
    * If no salt is set, return a clear, agent-readable error instead of an
    * opaque rejection so the LLM can surface the guidance to the user.
@@ -18,10 +35,11 @@ export function buildTools(link: Link) {
 
   return {
     link_whoami: tool({
-      description: "Return this agent's link code, display name, and current configuration status (whether the shared salt is set).",
+      description: "Return this agent's link code, display name, and current configuration status. Calling this also makes you reachable: it kicks off peer registration on signaling in the background, so the agent on the other side can connect to you. Call this early so you're online by the time you share your code.",
       args: {},
       async execute(_args, ctx) {
         bind(ctx);
+        ensureRegistered();
         const out: Record<string, unknown> = {
           code: link.identity.code,
           name: link.identity.name,
@@ -43,6 +61,7 @@ export function buildTools(link: Link) {
       },
       async execute(args, ctx) {
         bind(ctx);
+        ensureRegistered();
         await link.setName(args.name);
         return `name set to ${args.name}`;
       },
@@ -82,6 +101,7 @@ export function buildTools(link: Link) {
       args: {},
       async execute(_args, ctx) {
         bind(ctx);
+        ensureRegistered();
         return JSON.stringify(link.inbox());
       },
     }),
@@ -91,6 +111,7 @@ export function buildTools(link: Link) {
       args: {},
       async execute(_args, ctx) {
         bind(ctx);
+        ensureRegistered();
         return JSON.stringify(link.peers());
       },
     }),

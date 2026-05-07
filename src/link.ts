@@ -206,6 +206,8 @@ export class Link {
     lines.push(
       `- Namespace salt: configured (from ${this.salt.origin === "env" ? "env var OPENCODE_LINK_SALT" : "salt file"}). You can only reach agents whose salt matches.`,
       "",
+      "IMPORTANT — making yourself reachable: call link_whoami EARLY (e.g. on the first turn the user mentions linking, or as soon as you decide you might want to be reached). This registers your peer on the signaling network so other agents can connect to you. Until you call ANY link_* tool, your code is just a string — nobody can reach you. Sharing your code without first calling link_whoami is a common cause of `link_connect` timing out on the other side.",
+      "",
       "Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers, link_rotate.",
       "Codes are 6 characters of A-Z and 0-9 (e.g. `A1GH35`). Anything else is invalid.",
       "",
@@ -272,10 +274,20 @@ export class Link {
     const isCurrent = () => this.peer === myPeer && !myPeer.destroyed;
 
     // Wait for the initial open. once() auto-detaches so these listeners
-    // don't linger past first fire.
+    // don't linger past first fire. Bound the wait — a wedged signaling
+    // socket otherwise hangs the calling tool until opencode's outer
+    // timeout fires, which surfaces as an opaque "tool timed out" with
+    // no actionable info for the agent.
     await new Promise<void>((resolve, reject) => {
-      myPeer.once("open", () => resolve());
-      myPeer.once("error", (err: Error) => reject(err));
+      const t = setTimeout(
+        () => reject(new Error(
+          "peer signaling did not open within 20s. Possible causes: PeerJS public cloud unreachable from this network, " +
+          "firewall blocking wss://0.peerjs.com, or transient outage. Tell the user to retry; if it persists, check connectivity to peerjs.com."
+        )),
+        20000,
+      );
+      myPeer.once("open", () => { clearTimeout(t); resolve(); });
+      myPeer.once("error", (err: Error) => { clearTimeout(t); reject(err); });
     });
 
     myPeer.on("connection", (conn: any) => {
@@ -542,7 +554,12 @@ export class Link {
     }
     this.attach(conn);
     await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`connect to ${code} timed out — is the other side running?`)), 15000);
+      const t = setTimeout(() => reject(new Error(
+        `connect to ${code} timed out after 15s. Most common cause: the OTHER agent has not registered on signaling yet — ` +
+        `the receiving side must have called any link_* tool (link_whoami is enough) AT LEAST ONCE since opencode started, ` +
+        `otherwise their peer isn't reachable. Other causes: salt mismatch (both ends must use the EXACT same salt — origin on this side: ${this.salt.origin}), ` +
+        `or the other agent ran link_rotate after sharing the code. Ask the user to confirm both agents are running, both have the same salt configured, and the receiving agent has called link_whoami this session.`
+      )), 15000);
       conn.on("open", () => {
         clearTimeout(t);
         resolve();
