@@ -53,12 +53,9 @@ if [ -f "$STATE" ]; then
 fi
 
 # 3. Optionally remove identity files. Only ask if running interactively.
-# Note: $LINK_HOME is SHARED with the Claude Code install (if any) — the
-# identity-*.json files and the salt are read by both. Wiping it here also
-# wipes the Claude side. The default answer is N for safety.
 if [ -d "$LINK_HOME" ]; then
   if [ -t 0 ] && [ -t 1 ]; then
-    read -r -p "Also delete persisted identities + salt at $LINK_HOME? (shared with Claude Code install if you have one) [y/N] " yn
+    read -r -p "Also delete persisted identities + salt at $LINK_HOME? [y/N] " yn
     case "$yn" in
       y|Y|yes)
         rm -rf "$LINK_HOME"

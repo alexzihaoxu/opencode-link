@@ -1,16 +1,12 @@
 {
   "name": "opencode-link",
   "version": "0.0.1",
-  "description": "Peer-to-peer messaging between AI coding agents (opencode + Claude Code) over WebRTC.",
+  "description": "Peer-to-peer messaging between opencode agents over WebRTC.",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./tui": "./src/tui.ts",
-    "./mcp": "./src/mcp.ts"
-  },
-  "bin": {
-    "opencode-link-mcp": "./src/mcp.ts"
+    "./tui": "./src/tui.ts"
   },
   "files": [
     "src",
@@ -19,10 +15,6 @@
     "install.ps1",
     "uninstall.sh",
     "uninstall.ps1",
-    "install-claude.sh",
-    "install-claude.ps1",
-    "uninstall-claude.sh",
-    "uninstall-claude.ps1",
     "README.md",
     "LICENSE"
   ],
@@ -41,9 +33,6 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
-    "claude-code",
-    "mcp",
-    "mcp-server",
     "peerjs",
     "webrtc",
     "p2p",
@@ -51,7 +40,6 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "node-datachannel": "^0.27.0",
     "web-file-polyfill": "^1.0.4",
     "filereader": "^0.10.3",

@@ -53,12 +53,11 @@ try {
         Remove-Item -Force $stateFile -ErrorAction SilentlyContinue
     }
 
-    # 3. Optionally remove identity files. Note: $linkHome is SHARED with the
-    # Claude Code install (if any). Wiping it here also wipes the Claude side.
+    # 3. Optionally remove identity files.
     if (Test-Path $linkHome) {
         $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI
         if ($isInteractive) {
-            $yn = Read-Host "Also delete persisted identities + salt at $linkHome? (shared with Claude Code install if you have one) [y/N]"
+            $yn = Read-Host "Also delete persisted identities + salt at $linkHome? [y/N]"
             if ($yn -match '^(y|yes)$') {
                 Remove-Item -Recurse -Force $linkHome
                 Write-Host "✓ identities removed"

@@ -433,24 +433,7 @@ export class Link {
     conn.send(JSON.stringify(msg));
   }
 
-  /**
-   * Optional host-supplied push delivery. When set, deliver()/flushPending()
-   * route through this function instead of the default opencode
-   * client.session.prompt() path. Used by the Claude Code MCP entry point
-   * to emit channel notifications, and by anything else that isn't opencode.
-   */
-  private outbound: ((push: PendingPush) => void | Promise<void>) | null = null;
-
-  setOutbound(fn: ((push: PendingPush) => void | Promise<void>) | null): void {
-    this.outbound = fn;
-    if (fn) this.flushPending();
-  }
-
   private deliver(push: PendingPush): void {
-    if (this.outbound) {
-      this.runOutbound(push);
-      return;
-    }
     if (!this.client || !this.lastSessionId) {
       this.pendingPushes.push(push);
       return;
@@ -458,27 +441,8 @@ export class Link {
     void this.pushToSession(this.lastSessionId, push);
   }
 
-  private runOutbound(push: PendingPush): void {
-    if (!this.outbound) return;
-    try {
-      const r = this.outbound(push);
-      if (r instanceof Promise) {
-        r.catch(() => this.pendingPushes.push(push));
-      }
-    } catch {
-      this.pendingPushes.push(push);
-    }
-  }
-
   private flushPending(): void {
-    if (this.pendingPushes.length === 0) return;
-    if (this.outbound) {
-      const drained = this.pendingPushes;
-      this.pendingPushes = [];
-      for (const push of drained) this.runOutbound(push);
-      return;
-    }
-    if (!this.client || !this.lastSessionId) return;
+    if (!this.client || !this.lastSessionId || this.pendingPushes.length === 0) return;
     const sid = this.lastSessionId;
     const drained = this.pendingPushes;
     this.pendingPushes = [];
